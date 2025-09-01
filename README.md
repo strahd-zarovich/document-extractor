@@ -1,139 +1,227 @@
-# 📄 Document Extractor – Dockerized Text Processing
+# Document Extractor (Docker)
 
-## Overview
+A lightweight, headless pipeline that converts mixed document batches into plain text and structured outputs. Designed for UnRAID-style deployments with predictable permissions and a **single `/data` mount**.
 
-This container is designed to extract as much text as possible from a wide range of document formats. It uses **multi-pass extraction** with fallback strategies (native text, OCR, multi-engine PDF tools) and organizes results into structured output folders.
-
-Key features:
-
-* Supports **DOC, DOCX, PDF, Images (JPG/PNG/TIFF)**, and more.
-* Multi-pass extraction:
-
-  1. DOC/DOCX → text
-  2. PDF (native text)
-  3. PDF OCR (tesseract)
-  4. PDF OCR (mupdf-tools)
-* Handles multiple **top-level input folders** at once.
-* Moves unprocessable files into a **Mandatory Review Folder**.
-* Produces both **CSV and JSON** outputs.
-* Automatically cleans up manifests and tmp data on startup.
-* Ensures **UnRAID-friendly permissions** (owner 99, group 100).
+* **OCR:** English only (`eng`)
+* **No WebUI:** operate via folders + logs
+* **Excel (`.xls/.xlsx`)**: routed to **Mandatory Review** (not auto-processed)
+* **Delete-after-success:** processed source files are removed; no `.processed.list` needed
 
 ---
 
-## Folder Structure
+## How it works
 
-When running, the container maintains:
+### Folder layout (single `/data` mount)
 
 ```
-/input
-   └── MyFolder1/
-   └── MyFolder2/
-   ...
-
-/output
-   └── MyFolder1/
-       ├── MyFolder1.csv
-       ├── MyFolder1.json
-       └── Mandatory Review Folder/
-   └── MyFolder2/
-       ├── MyFolder2.csv
-       ├── MyFolder2.json
-       └── Mandatory Review Folder/
-
-/tmp        → temporary working area
-/manifests  → manifest lists to track processed files
-/app        → scripts + config
+/data/
+  config/            # runtime config the container uses (copied on first start)
+  input/             # you place runs here; each subfolder = one run
+    2025-09-01_batch/
+      file1.pdf
+      file2.docx
+  output/            # results per run
+    2025-09-01_batch/
+      text/…         # extracted text artifacts (JSON/CSV per pass)
+      Mandatory Review/…  # files that need manual handling (e.g., .xlsx)
+  logs/              # (optional) if you configure file logging
 ```
 
-* **Processed files** are deleted after extraction.
-* **Empty folders** under `/input` are cleaned up (but `/input` itself is never deleted).
-* **Problematic files** are moved into the *Mandatory Review Folder*.
+**Runs:** Each top-level subfolder under `/data/input` is treated as a **run**. The container loops every `INPUT_CHECK_INTERVAL` seconds, finds run folders, and processes them sequentially. Output is mirrored under `/data/output/<RUN_NAME>`.
+
+### Pipeline (per file)
+
+* **PDF (`.pdf`)**
+
+  * Try to extract existing text (`pdftotext -layout`).
+  * If no/low text, OCR at sensible DPI.
+  * For very large PDFs, a page index (CSV) may be created.
+
+* **Word (`.doc`, `.docx`)**
+
+  * Extract textual content (paragraph-only fast path).
+  * If unsuitable, defer to later fallback or manual review (depending on your scripts).
+
+* **Text (`.txt`)**
+
+  * Copied/normalized into structured outputs.
+
+* **Excel (`.xls`, `.xlsx`)**
+
+  * **Not** auto-processed. Sent to **`Mandatory Review/`** in the corresponding run’s output.
+
+> Any file that fails quality checks is routed to **Mandatory Review** with a reason stamped in `review_manifest.csv`.
+
+### Delete-after-success
+
+When a file’s extraction meets the quality threshold (e.g., minimum non-whitespace chars), the original is **deleted** from `/data/input/<RUN_NAME>` and empty folders are pruned. Failed/unsupported items are preserved under `output/<RUN_NAME>/Mandatory Review`.
+
+---
+
+## Requirements & dependencies
+
+* Base: Debian (slim)
+* Installed tools (minimal set):
+
+  * `tesseract-ocr`, `tesseract-ocr-eng` (English OCR)
+  * `poppler-utils` (for `pdftotext`)
+  * `python3`, `python3-pip`
+  * common utilities: `bash`, `file`, `curl`, `inotify-tools` (optional), `unzip`, `gosu`, fonts
+
+> LibreOffice is **not required** for your scope (Excel is manual). If you later want legacy `.doc/.ppt/.odt` conversion, you can add `libreoffice` and update the docs accordingly.
 
 ---
 
 ## Configuration
 
-Global config lives in:
-`/app/config.conf`
+A default config is shipped **inside** the image at `/app/defaults/config.conf`. On first start, it’s copied to `/data/config/config.conf`. Edit the **runtime** file.
 
-Default variables:
+**Defaults (excerpt):**
 
 ```bash
-INPUT_DIR="/input"
-OUTPUT_DIR="/output"
-TMP_DIR="/tmp"
-MANIFEST_DIR="/manifests"
+# Paths
+INPUT_DIR="/data/input"
+OUTPUT_DIR="/data/output"
+LOG_DIR="/data/logs"
+WORK_DIR="/tmp/work"
 
-INPUT_CHECK_INTERVAL=15    # seconds between scans
-LOG_LEVEL="DEBUG"          # DEBUG, INFO, WARN, ERROR
-PDF_OCR_THRESHOLD=50       # pages – above this, large PDFs split into per-page CSVs
+# Logging & polling
+LOG_LEVEL="DEBUG"           # switch to INFO after tuning
+INPUT_CHECK_INTERVAL=15     # seconds; per-run scan interval
+
+# UnRAID-friendly ownership
+PUID=99     # nobody
+PGID=100    # users
+UMASK=002   # files 0664, dirs 0775
+
+# Large PDF handling
+BIGPDF_SIZE_LIMIT_MB=100
+BIGPDF_PAGE_LIMIT=500
+
+# Rerun behavior
+REPLACE_ON_RERUN=true
 ```
 
-* **INPUT\_CHECK\_INTERVAL** – how often the watcher scans `/input`.
-* **LOG\_LEVEL** – start in DEBUG for development, later switch to INFO.
-* **PDF\_OCR\_THRESHOLD** – if a PDF exceeds this many pages, it is split into smaller chunks for easier processing.
+You can also override via environment variables (`PUID`, `PGID`, `TZ`, etc.) in compose.
 
 ---
 
-## Usage
-
-### 1. Build
-
-From inside the repo folder:
+## Build
 
 ```bash
 docker build -t document-extractor:latest .
 ```
 
-### 2. Run
+> If you customize the Dockerfile, ensure you keep at least: `tesseract-ocr`, `tesseract-ocr-eng`, `poppler-utils`, `python3`, `python3-pip`.
 
-Basic run (UnRAID-friendly):
+---
 
-```bash
-docker run -d \
-  --name=document-extractor \
-  -v /mnt/user/appdata/document-extractor/input:/input \
-  -v /mnt/user/appdata/document-extractor/output:/output \
-  document-extractor:latest
+## Run (Compose)
+
+Use a **single** `/data` bind-mount. Healthcheck points to the in-container script path.
+
+```yaml
+version: "3.8"
+
+services:
+  document-extractor:
+    image: document-extractor:latest
+    container_name: document-extractor
+    user: "99:100"                  # UnRAID-friendly
+    restart: unless-stopped
+
+    volumes:
+      - /mnt/user/appdata/document-extractor/data:/data
+
+    environment:
+      - PUID=99
+      - PGID=100
+      - TZ=America/New_York
+
+    healthcheck:
+      test: ["CMD-SHELL", "/app/scripts/healthcheck.sh"]
+      interval: 2m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 ```
 
-Optional: override config values at runtime:
+### Healthcheck script (update if needed)
+
+If your existing `scripts/healthcheck.sh` targets `/output`, change it to `/data/output`:
 
 ```bash
--e INPUT_CHECK_INTERVAL=30 \
--e LOG_LEVEL=INFO \
+#!/bin/bash
+set -euo pipefail
+
+OUT_DIR="${OUTPUT_DIR:-/data/output}"
+mkdir -p "$OUT_DIR" || exit 1
+
+TEST_FILE="${OUT_DIR}/.healthcheck"
+echo "ok" > "$TEST_FILE" 2>/dev/null || exit 1
+rm -f "$TEST_FILE" || true
+exit 0
 ```
+
+---
+
+## Usage
+
+1. Create a run folder and add files:
+
+```
+/mnt/user/appdata/document-extractor/data/input/2025-09-01_batch/
+  contract.pdf
+  letter.docx
+  sheet.xlsx      # will go to Mandatory Review
+```
+
+2. Start the container (or it will pick up the new run on its next interval).
+
+3. Results appear under:
+
+```
+/mnt/user/appdata/document-extractor/data/output/2025-09-01_batch/
+  text/…                  # extracted artifacts (JSON/CSV per pass)
+  Mandatory Review/…      # unsupported/failed items (e.g., .xlsx)
+  review_manifest.csv     # reasons/notes for manual items
+```
+
+4. Source files that passed extraction are **deleted** from `/data/input/<RUN_NAME>` and empty dirs are cleaned up.
 
 ---
 
 ## Logs
 
-Logs are verbose in `DEBUG` mode:
+Logs are emitted to container stdout/stderr. Use:
 
 ```bash
 docker logs -f document-extractor
 ```
 
-* During testing: keep `DEBUG` to trace every pass.
-* After stable: set `INFO` for lighter logs.
+Optionally direct logs to files by adding logic in your scripts or mapping `/data/logs`.
 
 ---
 
-## Development Notes
+## Notes & known behaviors
 
-* **Manifests** prevent reprocessing of already completed files. On restart, manifests are cleared so files are rescanned.
-* **Permissions** are enforced via `fix_permissions.sh`. Everything is owned by `nobody:users` (`99:100`).
-* **Watch Loop** (`watch_input.sh`) never logs the idle `/input` check to prevent log bloat. Only activity (found files, errors, review moves) is logged.
-* **Manual Review** – anything unsupported, corrupted, or too ambiguous is moved here automatically.
-
----
-
-## Roadmap / Enhancements
-
-* Multi-pass OCR tuning (DPI, language packs) can be set inside each pass script.
-* Optional: add healthcheck script to validate dependencies.
-* Optional: add export compression (`.zip` outputs).
+* **Excel:** `.xls`/`.xlsx` are routed to **Mandatory Review**, by design.
+* **English-only OCR:** `eng` is used; add other Tesseract packs only if you expand your scope.
+* **No WebUI:** control via folders and container logs.
+* **Reruns:** If `REPLACE_ON_RERUN=true`, a run reprocessed with the same name will overwrite its output folder.
 
 ---
-# document-extractor
+
+## Troubleshooting
+
+* **Nothing happens:** Verify your run folder is directly under `/data/input` (not nested deeper).
+* **Healthcheck fails:** Ensure the script path and `/data/output` are correct and writable.
+* **Container exits early:** Check `docker logs`. If a single file causes a tool error, the run will continue to the next file; failures go to **Mandatory Review**.
+* **Permissions:** Confirm `PUID/PGID` match your host (UnRAID default `99:100`).
+
