@@ -1,3 +1,6 @@
+ARG VERSION=0.0.0
+LABEL version="${VERSION}"
+
 FROM debian:stable-slim
 
 # UnRAID-friendly defaults (can be overridden at runtime)
