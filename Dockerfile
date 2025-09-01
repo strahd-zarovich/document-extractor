@@ -1,7 +1,7 @@
+FROM debian:stable-slim
+
 ARG VERSION=0.0.0
 LABEL version="${VERSION}"
-
-FROM debian:stable-slim
 
 # UnRAID-friendly defaults (can be overridden at runtime)
 ENV PUID=99 \
