@@ -225,3 +225,4 @@ Optionally direct logs to files by adding logic in your scripts or mapping `/dat
 * **Container exits early:** Check `docker logs`. If a single file causes a tool error, the run will continue to the next file; failures go to **Mandatory Review**.
 * **Permissions:** Confirm `PUID/PGID` match your host (UnRAID default `99:100`).
 
+
