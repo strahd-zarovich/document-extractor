@@ -1,0 +1,52 @@
+version: "3.8"
+
+services:
+  document-extractor:
+    image: document-extractor:latest
+    container_name: document-extractor
+    # Run as UnRAID-friendly user/group (nobody:users)
+    user: "99:100"
+    restart: unless-stopped
+
+    # Mount your input/output folders from UnRAID
+    volumes:
+      - /mnt/user/appdata/document-extractor/input:/input
+      - /mnt/user/appdata/document-extractor/output:/output
+      # Optional persistent logs; uncomment if you want logs on the host
+      # - /mnt/user/appdata/document-extractor/logs:/logs
+
+    # Minimal globals only; all other knobs live inside pass scripts
+    environment:
+      # Paths (override only if you change the container defaults)
+      - INPUT_DIR=/input
+      - OUTPUT_DIR=/output
+      - WORK_DIR=/tmp/work
+      - LOG_DIR=/logs
+
+      # Watcher/polling and logging
+      - INPUT_CHECK_INTERVAL=15   # seconds; polling is silent
+      - LOG_LEVEL=DEBUG           # switch to INFO when stable
+
+      # UnRAID ownership + umask (files 0664, dirs 0775)
+      - PUID=99
+      - PGID=100
+      - UMASK=002
+
+      # “Big PDF” Option C thresholds (per-doc page CSV + anchors)
+      - BIGPDF_SIZE_LIMIT_MB=100
+      - BIGPDF_PAGE_LIMIT=500
+
+    # Healthcheck (mirrors the container's internal script)
+    healthcheck:
+      test: [ "CMD-SHELL", "/app/document-extractor/scripts/healthcheck.sh" ]
+      interval: 2m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+    # Helpful logging options (Docker-managed logs)
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
