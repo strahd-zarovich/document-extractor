@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
+# pass_doc.sh — DOCX full-text extractor (no LibreOffice)
+# Args: <file> <csv_out> <json_out> <out_dir>
 set -Eeuo pipefail
 
-# Args
 file="$1"
-csv="$2"
-json="$3"
-out_path="$4"
+csv="$2"   # kept for signature; not used here
+json="$3"  # kept for signature; not used here
+out_dir="$4"
 
-# Runtime config & logging
+# Load config & helpers if present
 if [[ -n "${CONFIG_FILE:-}" && -f "${CONFIG_FILE}" ]]; then
   # shellcheck disable=SC1090
   . "${CONFIG_FILE}"
@@ -15,71 +16,105 @@ fi
 # shellcheck disable=SC1091
 . /app/scripts/common.sh
 
-tmp_txt="$(mktemp -p "${WORK_DIR:-/tmp/work}" docx.XXXXXX.txt)"
-method="docx_native"
-used_ocr=false
-wrote_any=false
+bn="$(basename -- "$file")"
+ext="${bn##*.}"
+ext_lc="$(printf '%s' "$ext" | tr 'A-Z' 'a-z')"
 
-log_debug "DOC/DOCX extraction starting: $file"
-
-# Prefer docx2txt
-if command -v docx2txt >/dev/null 2>&1; then
-  docx2txt < "$file" > "$tmp_txt" 2>/dev/null || true
-fi
-
-# Fallback to LibreOffice headless
-if [[ ! -s "$tmp_txt" ]]; then
-  lo_out_dir="$(mktemp -d -p "${WORK_DIR:-/tmp/work}" lo.XXXXXX)"
-  soffice --headless --convert-to txt:"Text" --outdir "$lo_out_dir" "$file" >/dev/null 2>&1 || true
-  candidate="$(find "$lo_out_dir" -maxdepth 1 -type f -name '*.txt' | head -n1 || true)"
-  if [[ -n "$candidate" && -s "$candidate" ]]; then
-    mv "$candidate" "$tmp_txt"
-    method="lo_txt"
-  fi
-  rm -rf "$lo_out_dir" 2>/dev/null || true
-fi
-
-# Image-heavy DOCX heuristic: if no text and many embedded images, bail
-if [[ ! -s "$tmp_txt" && "${file,,}" == *.docx ]]; then
-  if unzip -l "$file" 2>/dev/null | awk '{print $4}' | grep -q '^word/media/'; then
-    log_warn "DOCX likely image-heavy; skipping to avoid OCR garbage: $(basename "$file")"
-    rm -f "$tmp_txt"
-    exit 1
-  fi
-fi
-
-# Fail if no text at all
-if [[ ! -s "$tmp_txt" ]]; then
-  log_warn "DOC/DOCX extraction produced no text: $(basename "$file")"
-  rm -f "$tmp_txt"
+# Only DOCX supported here; .doc should be routed to Manual Review by caller
+if [[ "$ext_lc" != "docx" ]]; then
+  log_warn "pass_doc: unsupported extension without LibreOffice: $bn"
   exit 1
 fi
 
-# Emit NON-BLANK lines only
-page_num=1
-while IFS= read -r line || [[ -n "$line" ]]; do
-  # skip blank/whitespace-only lines
-  [[ -z "${line//[[:space:]]/}" ]] && continue
+out_txt="${out_dir}/${bn}.txt"
+tmp_txt="$(mktemp -t docx_alltext.XXXXXX)"
+trap 'rm -f "$tmp_txt"' EXIT
 
-  # CSV (RFC-4180 escaping)
-  safe_csv="${line//\"/\"\"}"
-  printf '"%s",%d,"%s"\n' "$file" "$page_num" "$safe_csv" >> "$csv"
+# Python: parse DOCX XML parts and extract text from paragraphs everywhere
+if ! command -v python3 >/dev/null 2>&1; then
+  log_error "python3 not available for DOCX extraction: $bn"
+  exit 1
+fi
 
-  # JSONL (escape)
-  safe_json="${line//\\/\\\\}"; safe_json="${safe_json//\"/\\\"}"
-  printf '{"file":"%s","page":%d,"text":"%s","method":"%s","used_ocr":%s}\n' \
-         "$file" "$page_num" "$safe_json" "$method" "$used_ocr" >> "$json"
+if ! python3 - "$file" > "$tmp_txt" 2>/dev/null <<'PY'
+import sys, zipfile, xml.etree.ElementTree as ET
 
-  wrote_any=true
-  ((page_num++))
+NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+
+def text_from_paragraphs(xml_bytes):
+    try:
+        root = ET.fromstring(xml_bytes)
+    except Exception:
+        return []
+    lines = []
+    # find all paragraphs anywhere in the part (tables, textboxes, etc. contain w:p)
+    for p in root.findall('.//w:p', NS):
+        runs = [t.text or "" for t in p.findall('.//w:t', NS)]
+        line = "".join(runs).strip()
+        if line:
+            lines.append(line)
+    return lines
+
+def collect(docx_path):
+    with zipfile.ZipFile(docx_path) as z:
+        want = []
+        # document body
+        if 'word/document.xml' in z.namelist():
+            want.append(('BODY', 'word/document.xml'))
+        # headers/footers (any number)
+        for name in z.namelist():
+            if name.startswith('word/header') and name.endswith('.xml'):
+                want.append(('HEADER', name))
+            elif name.startswith('word/footer') and name.endswith('.xml'):
+                want.append(('FOOTER', name))
+        # footnotes/endnotes/comments (if present)
+        for part, label in [('word/footnotes.xml', 'FOOTNOTES'),
+                            ('word/endnotes.xml',  'ENDNOTES'),
+                            ('word/comments.xml',  'COMMENTS')]:
+            if part in z.namelist():
+                want.append((label, part))
+
+        out_lines = []
+        for label, name in want:
+            try:
+                xml_bytes = z.read(name)
+            except KeyError:
+                continue
+            lines = text_from_paragraphs(xml_bytes)
+            if lines:
+                # Add a blank line between sections; omit labels to keep plain text simple
+                if out_lines:
+                    out_lines.append("")
+                out_lines.extend(lines)
+        return out_lines
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        sys.exit(2)
+    path = sys.argv[1]
+    lines = collect(path)
+    sys.stdout.write("\n".join(lines))
+PY
+then
+  log_warn "DOCX extraction failed: $bn"
+  exit 1
+fi
+
+# Write cleaned text (strip CRs & trailing spaces)
+mkdir -p "$out_dir"
+> "$out_txt"
+while IFS= read -r line; do
+  cl="$(printf '%s' "$line" | tr -d '\r' | sed 's/[ \t]*$//')"
+  [[ -z "$cl" ]] && { echo "" >> "$out_txt"; continue; }
+  printf '%s\n' "$cl" >> "$out_txt"
 done < "$tmp_txt"
 
-rm -f "$tmp_txt"
-
-if [[ "$wrote_any" != true ]]; then
-  log_warn "DOC/DOCX had only blank lines after cleaning: $(basename "$file")"
+# Sanity: require some non-whitespace
+chars="$(tr -d '\n\r\t ' < "$out_txt" | wc -c | awk '{print $1}')"
+if [[ "$chars" -lt 20 ]]; then
+  log_warn "DOCX produced too little text ($chars chars): $bn"
   exit 1
 fi
 
-log_debug "DOC/DOCX extraction completed: $file (method=${method})"
+log_info "DOCX full-text extraction complete (no LibreOffice): $bn"
 exit 0
