@@ -1,11 +1,17 @@
+Here’s an updated **README.md** you can paste in, with the GitHub URL added and the DOCX section clarified (full-text extraction without LibreOffice):
+
+```markdown
 # Document Extractor (Docker)
 
 A lightweight, headless pipeline that converts mixed document batches into plain text and structured outputs. Designed for UnRAID-style deployments with predictable permissions and a **single `/data` mount**.
 
-* **OCR:** English only (`eng`)
-* **No WebUI:** operate via folders + logs
-* **Excel (`.xls/.xlsx`)**: routed to **Mandatory Review** (not auto-processed)
-* **Delete-after-success:** processed source files are removed; no `.processed.list` needed
+**Repository:** https://github.com/strahd-zarovich/document-extractor.git
+
+- **OCR:** English only (`eng`)
+- **No WebUI:** operate via folders + logs
+- **DOCX:** full-text extraction (body, tables, headers/footers, footnotes/endnotes, comments) — no LibreOffice required
+- **Excel (`.xls/.xlsx`)**: routed to **Mandatory Review** (not auto-processed)
+- **Delete-after-success:** processed source files are removed; no `.processed.list` needed
 
 ---
 
@@ -14,41 +20,35 @@ A lightweight, headless pipeline that converts mixed document batches into plain
 ### Folder layout (single `/data` mount)
 
 ```
+
 /data/
-  config/            # runtime config the container uses (copied on first start)
-  input/             # you place runs here; each subfolder = one run
-    2025-09-01_batch/
-      file1.pdf
-      file2.docx
-  output/            # results per run
-    2025-09-01_batch/
-      text/…         # extracted text artifacts (JSON/CSV per pass)
-      Mandatory Review/…  # files that need manual handling (e.g., .xlsx)
-  logs/              # (optional) if you configure file logging
-```
+config/            # runtime config the container uses (copied on first start)
+input/             # you place runs here; each subfolder = one run
+2025-09-01\_batch/
+file1.pdf
+file2.docx
+output/            # results per run
+2025-09-01\_batch/
+text/…               # extracted text artifacts
+Mandatory Review/…   # files that need manual handling (e.g., .xlsx)
+logs/              # (optional) if you configure file logging
+
+````
 
 **Runs:** Each top-level subfolder under `/data/input` is treated as a **run**. The container loops every `INPUT_CHECK_INTERVAL` seconds, finds run folders, and processes them sequentially. Output is mirrored under `/data/output/<RUN_NAME>`.
 
 ### Pipeline (per file)
 
-* **PDF (`.pdf`)**
-
-  * Try to extract existing text (`pdftotext -layout`).
-  * If no/low text, OCR at sensible DPI.
-  * For very large PDFs, a page index (CSV) may be created.
-
-* **Word (`.doc`, `.docx`)**
-
-  * Extract textual content (paragraph-only fast path).
-  * If unsuitable, defer to later fallback or manual review (depending on your scripts).
-
-* **Text (`.txt`)**
-
-  * Copied/normalized into structured outputs.
-
-* **Excel (`.xls`, `.xlsx`)**
-
-  * **Not** auto-processed. Sent to **`Mandatory Review/`** in the corresponding run’s output.
+- **PDF (`.pdf`)**
+  - Try to extract existing text (`pdftotext -layout`).
+  - If no/low text, OCR at sensible DPI.
+- **Word**
+  - **`.docx`** → Python-based full-text extraction (paragraphs, tables, headers/footers, foot/endnotes, comments).
+  - **`.doc`** → Not auto-processed (no LibreOffice); routed to **Mandatory Review**.
+- **Text (`.txt`)**
+  - Copied/normalized into structured outputs.
+- **Excel (`.xls`, `.xlsx`)**
+  - **Not** auto-processed. Sent to **`Mandatory Review/`** in the run’s output.
 
 > Any file that fails quality checks is routed to **Mandatory Review** with a reason stamped in `review_manifest.csv`.
 
@@ -60,15 +60,14 @@ When a file’s extraction meets the quality threshold (e.g., minimum non-whites
 
 ## Requirements & dependencies
 
-* Base: Debian (slim)
-* Installed tools (minimal set):
+- Base: Debian (slim)
+- Installed tools (minimal set):
+  - `tesseract-ocr`, `tesseract-ocr-eng` (English OCR)
+  - `poppler-utils` (for `pdftotext` / `pdftoppm`)
+  - `python3`, `python3-pip`
+  - common utilities: `bash`, `file`, `curl`, `inotify-tools` (optional), `unzip`, `gosu`, fonts
 
-  * `tesseract-ocr`, `tesseract-ocr-eng` (English OCR)
-  * `poppler-utils` (for `pdftotext`)
-  * `python3`, `python3-pip`
-  * common utilities: `bash`, `file`, `curl`, `inotify-tools` (optional), `unzip`, `gosu`, fonts
-
-> LibreOffice is **not required** for your scope (Excel is manual). If you later want legacy `.doc/.ppt/.odt` conversion, you can add `libreoffice` and update the docs accordingly.
+> LibreOffice is **not required**. If you later want legacy `.doc/.ppt/.odt` conversion, you can add `libreoffice` and update the docs accordingly.
 
 ---
 
@@ -77,7 +76,6 @@ When a file’s extraction meets the quality threshold (e.g., minimum non-whites
 A default config is shipped **inside** the image at `/app/defaults/config.conf`. On first start, it’s copied to `/data/config/config.conf`. Edit the **runtime** file.
 
 **Defaults (excerpt):**
-
 ```bash
 # Paths
 INPUT_DIR="/data/input"
@@ -100,9 +98,9 @@ BIGPDF_PAGE_LIMIT=500
 
 # Rerun behavior
 REPLACE_ON_RERUN=true
-```
+````
 
-You can also override via environment variables (`PUID`, `PGID`, `TZ`, etc.) in compose.
+Environment variables (`PUID`, `PGID`, `TZ`, etc.) can override these in Compose.
 
 ---
 
@@ -112,7 +110,7 @@ You can also override via environment variables (`PUID`, `PGID`, `TZ`, etc.) in 
 docker build -t document-extractor:latest .
 ```
 
-> If you customize the Dockerfile, ensure you keep at least: `tesseract-ocr`, `tesseract-ocr-eng`, `poppler-utils`, `python3`, `python3-pip`.
+> Ensure the Dockerfile installs at least: `tesseract-ocr`, `tesseract-ocr-eng`, `poppler-utils`, `python3`, `python3-pip`.
 
 ---
 
@@ -154,8 +152,6 @@ services:
 
 ### Healthcheck script (update if needed)
 
-If your existing `scripts/healthcheck.sh` targets `/output`, change it to `/data/output`:
-
 ```bash
 #!/bin/bash
 set -euo pipefail
@@ -179,7 +175,7 @@ exit 0
 /mnt/user/appdata/document-extractor/data/input/2025-09-01_batch/
   contract.pdf
   letter.docx
-  sheet.xlsx      # will go to Mandatory Review
+  sheet.xlsx      # goes to Mandatory Review
 ```
 
 2. Start the container (or it will pick up the new run on its next interval).
@@ -188,8 +184,8 @@ exit 0
 
 ```
 /mnt/user/appdata/document-extractor/data/output/2025-09-01_batch/
-  text/…                  # extracted artifacts (JSON/CSV per pass)
-  Mandatory Review/…      # unsupported/failed items (e.g., .xlsx)
+  text/…                  # extracted artifacts
+  Mandatory Review/…      # unsupported/failed items (e.g., .xlsx, .doc)
   review_manifest.csv     # reasons/notes for manual items
 ```
 
@@ -199,20 +195,21 @@ exit 0
 
 ## Logs
 
-Logs are emitted to container stdout/stderr. Use:
+Logs are emitted to container stdout/stderr:
 
 ```bash
 docker logs -f document-extractor
 ```
 
-Optionally direct logs to files by adding logic in your scripts or mapping `/data/logs`.
+Optionally direct logs to files by mapping `/data/logs` and enabling file logging in scripts.
 
 ---
 
 ## Notes & known behaviors
 
-* **Excel:** `.xls`/`.xlsx` are routed to **Mandatory Review**, by design.
-* **English-only OCR:** `eng` is used; add other Tesseract packs only if you expand your scope.
+* **DOCX:** full-text extraction without LibreOffice.
+* **Legacy .doc / Excel:** routed to **Mandatory Review** by design.
+* **English-only OCR:** `eng` is used; add other Tesseract packs only if you expand scope.
 * **No WebUI:** control via folders and container logs.
 * **Reruns:** If `REPLACE_ON_RERUN=true`, a run reprocessed with the same name will overwrite its output folder.
 
@@ -222,7 +219,10 @@ Optionally direct logs to files by adding logic in your scripts or mapping `/dat
 
 * **Nothing happens:** Verify your run folder is directly under `/data/input` (not nested deeper).
 * **Healthcheck fails:** Ensure the script path and `/data/output` are correct and writable.
-* **Container exits early:** Check `docker logs`. If a single file causes a tool error, the run will continue to the next file; failures go to **Mandatory Review**.
+* **Container exits early:** Check `docker logs`. Failures go to **Mandatory Review**; processing continues.
 * **Permissions:** Confirm `PUID/PGID` match your host (UnRAID default `99:100`).
 
+```
 
+Want me to also prep a quick `.dockerignore` snippet to keep your image lean?
+```
