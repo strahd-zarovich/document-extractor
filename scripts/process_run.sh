@@ -11,6 +11,17 @@ TMP_PATH="${WORK_DIR:-/tmp/work}/${RUN_NAME}"
 
 mkdir -p "$OUT_PATH" "$TMP_PATH" "$OUT_PATH/Mandatory Review"
 
+# Per-run log file (mirror of log_* output for this run)
+RUN_LOG="${OUT_PATH}/run.log"
+export RUN_LOG
+{
+  printf '--- Run start %s ---\n' "$(date +'%F %T')"
+  printf 'RUN_NAME=%s\nINPUT=%s\nOUTPUT=%s\n' "$RUN_NAME" "$RUN_PATH" "$OUT_PATH"
+} >> "$RUN_LOG" 2>/dev/null || true
+
+# Ensure tmp is always cleaned (even on early exit)
+trap 'rm -rf "$TMP_PATH"' EXIT
+
 # Source runtime config & helpers
 if [[ -n "${CONFIG_FILE:-}" && -f "${CONFIG_FILE}" ]]; then
   # shellcheck disable=SC1090
@@ -48,8 +59,22 @@ export FIRST_JSON=true
 
 # Iterate input files
 find "$RUN_PATH" -type f | while read -r file; do
+  # Auto-delete unsupported audio
+  case "${file##*.}" in
+    wav|WAV)
+      log_info "Deleting unsupported audio (.wav): $(basename "$file")"
+      rm -f -- "$file"
+      continue
+      ;;
+  esac
+
   process_file "$file" "$RUN_NAME" "$CSV_FILE" "$JSON_FILE" "$OUT_PATH"
 done
+
+# Mark end of run in the per-run log
+if [ -n "${RUN_LOG:-}" ]; then
+  printf '--- Run complete %s ---\n' "$(date +'%F %T')" >> "$RUN_LOG" 2>/dev/null || true
+fi
 
 # Cleanup tmp for this run
 rm -rf "$TMP_PATH"

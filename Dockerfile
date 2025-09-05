@@ -17,10 +17,14 @@ RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-eng \
     poppler-utils \
-    mupdf-tools \
-    imagemagick \
-    libimage-exiftool-perl \
     file \
+    curl \
+    unzip \
+    gnupg \
+    gosu \
+    fonts-dejavu \
+	fonts-liberation2 \
+    inotify-tools \
     python3-lxml \
     python3-docx \
     python3-pdfminer \

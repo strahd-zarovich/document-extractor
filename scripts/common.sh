@@ -11,16 +11,27 @@ fi
 log_debug() {
     if [[ "${LOG_LEVEL:-DEBUG}" == "DEBUG" ]]; then
         echo "[DEBUG] $1"
+        # mirror to per-run log if set
+        if [ -n "${RUN_LOG:-}" ]; then printf '%s\n' "[DEBUG] $1" >> "$RUN_LOG" 2>/dev/null || true; fi
     fi
 }
+
 log_info() {
     echo "[INFO] $1"
+    # mirror to per-run log if set
+    if [ -n "${RUN_LOG:-}" ]; then printf '%s\n' "[INFO] $1" >> "$RUN_LOG" 2>/dev/null || true; fi
 }
+
 log_warn() {
     echo "[WARN] $1"
+    # mirror to per-run log if set
+    if [ -n "${RUN_LOG:-}" ]; then printf '%s\n' "[WARN] $1" >> "$RUN_LOG" 2>/dev/null || true; fi
 }
+
 log_error() {
     echo "[ERROR] $1" >&2
+    # mirror to per-run log if set
+    if [ -n "${RUN_LOG:-}" ]; then printf '%s\n' "[ERROR] $1" >> "$RUN_LOG" 2>/dev/null || true; fi
 }
 
 # ---------- File Processing ----------

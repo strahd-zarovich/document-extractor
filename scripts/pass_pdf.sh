@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
+# pass_pdf.sh — PDF text + OCR (CSV-only; no TXT artifacts)
+# Args: <file> <csv_out> <json_out> <out_dir>
 set -Eeuo pipefail
 
-# Args
 file="$1"
 csv="$2"
 json="$3"
@@ -15,108 +16,90 @@ fi
 # shellcheck disable=SC1091
 . /app/scripts/common.sh
 
-# --- Local knobs (pass-owned) ---
-PDF_OCR_THRESHOLD=${PDF_OCR_THRESHOLD:-25}  # characters; below this per-page we OCR
-OCR_DPI=${OCR_DPI:-300}
-TESS_LANG=${TESS_LANG:-eng}
-TESS_PSM=${TESS_PSM:-3}
-TESS_OEM=${TESS_OEM:-1}
+: "${WORK_DIR:=/tmp/work}"
+: "${OCR_LANG:=eng}"
+: "${PDF_TEXT_MIN_CHARS:=120}"
+: "${PDF_OCR_DPI:=300}"
+: "${WRITE_TXT_ARTIFACTS:=false}"   # must remain false per requirements
 
-work_root="${WORK_DIR:-/tmp/work}"
-work_dir="$(mktemp -d -p "$work_root" pdf.XXXXXX)"
+bn="$(basename -- "$file")"
+
+work_dir="$(mktemp -d -p "${WORK_DIR}" "pdf.$$.$(date +%s).XXXX")"
 trap 'rm -rf "$work_dir"' EXIT
 
-log_debug "PDF extraction starting: $file"
+txt_fast="${work_dir}/fast.txt"
+txt_ocr="${work_dir}/ocr.txt"
 
-# Page count & size (Option C)
-pages=$(pdfinfo "$file" 2>/dev/null | awk -F': *' '/^Pages:/ {print $2}' | tr -d ' ' || true)
-pages=${pages:-0}
-size_bytes=$(stat -c%s "$file" 2>/dev/null || echo 0)
-size_mb=$(( (size_bytes + 1024*1024 - 1) / (1024*1024) ))
-
-# Decide if we write a page index CSV
-bigpdf=false
-if { [[ -n "${BIGPDF_PAGE_LIMIT:-}" && "$pages" -gt "${BIGPDF_PAGE_LIMIT}" ]] || [[ -n "${BIGPDF_SIZE_LIMIT_MB:-}" && "$size_mb" -gt "${BIGPDF_SIZE_LIMIT_MB}" ]]; }; then
-  bigpdf=true
-  base="$(basename "$file")"
-  slug="${base%.*}"
-  page_index_csv="${out_path}/${slug}.pages.csv"
-  [[ -f "$page_index_csv" ]] || echo "page,chars,method,used_ocr,notes" > "$page_index_csv"
+# Ensure CSV header exists
+if [[ -n "${csv:-}" && ! -s "$csv" ]]; then
+  printf 'file,page,text,method,used_ocr\n' > "$csv"
 fi
 
-# Fallback if pdfinfo failed
-[[ "$pages" -eq 0 ]] && pages=1
-
-wrote_any=false
-
-for ((p=1; p<=pages; p++)); do
-  page_txt="${work_dir}/p${p}.txt"
-  notes="-"
-  method="pdftext"
-  used_ocr=false
-
-  # Native text per page
-  if ! pdftotext -f "$p" -l "$p" "$file" "$page_txt" 2>/dev/null; then
-    : > "$page_txt"
-  fi
-
-  # Char count
-  char_count=0
-  [[ -f "$page_txt" ]] && char_count=$(wc -m < "$page_txt" | tr -d ' ')
-
-  # OCR if too little native text
-  if [[ "$char_count" -lt "$PDF_OCR_THRESHOLD" ]]; then
-    ppm_prefix="${work_dir}/page-${p}"
-    if pdftoppm -r "$OCR_DPI" -f "$p" -l "$p" "$file" "$ppm_prefix" >/dev/null 2>&1; then
-      for ppm in "${ppm_prefix}"-*.ppm; do
-        [[ -f "$ppm" ]] || continue
-        tesseract "$ppm" "${ppm%.ppm}" -l "$TESS_LANG" --oem "$TESS_OEM" --psm "$TESS_PSM" >/dev/null 2>&1 || true
-        [[ -f "${ppm%.ppm}.txt" ]] && cat "${ppm%.ppm}.txt" > "$page_txt"
-        rm -f "${ppm%.ppm}.txt" "$ppm" 2>/dev/null || true
-        break
-      done
-      used_ocr=true
-      method="ocr_tesseract"
-      notes="dpi=${OCR_DPI}; oem=${TESS_OEM}; psm=${TESS_PSM}"
-    fi
-    [[ -f "$page_txt" ]] && char_count=$(wc -m < "$page_txt" | tr -d ' ')
-
-    # Fallback: MuPDF text stream
-    if [[ "$char_count" -lt "$PDF_OCR_THRESHOLD" ]]; then
-      mutool draw -F txt -o "${work_dir}/p${p}.mutxt" "$file" "$p" >/dev/null 2>&1 || true
-      if [[ -s "${work_dir}/p${p}.mutxt" ]]; then
-        mv -f "${work_dir}/p${p}.mutxt" "$page_txt"
-        char_count=$(wc -m < "$page_txt" | tr -d ' ')
-        used_ocr=true
-        method="ocr_mupdf"
-        notes="mutool txt"
+# 1) Try text layer first (pdftotext -layout)
+if command -v pdftotext >/dev/null 2>&1; then
+  if pdftotext -layout "$file" "$txt_fast" 2>/dev/null; then
+    chars="$(tr -d '\n\r\t ' < "$txt_fast" | wc -c | awk '{print $1}')"
+    if [[ "$chars" -ge "$PDF_TEXT_MIN_CHARS" ]]; then
+      log_info "PDF text layer used: $bn (${chars} chars)"
+      # Append one CSV row for entire PDF (compact; minimal change)
+      if [[ -n "${csv:-}" ]]; then
+        _t="$(sed 's/\r//g' "$txt_fast" | sed ':a;N;$!ba;s/\n/\\n/g')"
+        _t="${_t//\"/\"\"}"
+        printf '"%s",%d,"%s","%s",%s\n' "$file" 1 "$_t" "pdf_text" false >> "$csv"
       fi
+      exit 0
+    else
+      log_debug "PDF text layer too small (${chars} < ${PDF_TEXT_MIN_CHARS}): $bn"
     fi
+  else
+    log_debug "pdftotext failed on: $bn"
   fi
+else
+  log_warn "pdftotext not found; skipping fast text for: $bn"
+fi
 
-  # Write outputs for NON-BLANK lines only
-  if [[ -s "$page_txt" ]]; then
-    while IFS= read -r line || [[ -n "$line" ]]; do
-      # skip blank/whitespace-only lines
-      [[ -z "${line//[[:space:]]/}" ]] && continue
+# 2) OCR fallback (pdftoppm -> tesseract)
+if ! command -v tesseract >/dev/null 2>&1; then
+  log_error "tesseract not available; cannot OCR: $bn"
+  exit 1
+fi
+if ! command -v pdftoppm >/dev/null 2>&1; then
+  log_error "pdftoppm not available; cannot render for OCR: $bn"
+  exit 1
+fi
 
-      # CSV (RFC-4180: escape quotes by doubling)
-      safe_csv="${line//\"/\"\"}"
-      printf '"%s",%d,"%s"\n' "$file" "$p" "$safe_csv" >> "$csv"
+log_info "PDF OCR path: $bn (dpi=${PDF_OCR_DPI}, lang=${OCR_LANG})"
 
-      # JSONL (escape for JSON)
-      safe_json="${line//\\/\\\\}"; safe_json="${safe_json//\"/\\\"}"
-      printf '{"file":"%s","page":%d,"text":"%s","method":"%s","used_ocr":%s}\n' \
-             "$file" "$p" "$safe_json" "$method" "$used_ocr" >> "$json"
+pdftoppm -r "$PDF_OCR_DPI" "$file" "${work_dir}/page" 1>/dev/null
 
-      wrote_any=true
-    done < "$page_txt"
-  fi
-
-  # Page index for big PDFs
-  if [[ "$bigpdf" == true ]]; then
-    printf '%d,%d,%s,%s,"%s"\n' "$p" "$char_count" "$method" "$used_ocr" "$notes" >> "$page_index_csv"
+> "$txt_ocr"
+shopt -s nullglob
+for ppm in "${work_dir}"/page-*.ppm; do
+  base="${ppm%.*}"
+  if tesseract "$ppm" "${base}" -l "$OCR_LANG" --psm 3 1>/dev/null 2>&1; then
+    page_txt="${base}.txt"
+    if [[ -s "$page_txt" ]]; then
+      cat "$page_txt" >> "$txt_ocr"
+      printf '\n' >> "$txt_ocr"
+    fi
+  else
+    log_debug "tesseract failed on: ${ppm##*/}"
   fi
 done
 
-# Success only if we wrote at least one non
+# Success only if we wrote useful text
+if [[ -s "$txt_ocr" ]]; then
+  chars="$(tr -d '\n\r\t ' < "$txt_ocr" | wc -c | awk '{print $1}')"
+  if [[ "$chars" -ge "$PDF_TEXT_MIN_CHARS" ]]; then
+    log_info "PDF OCR complete: $bn (${chars} chars)"
+    if [[ -n "${csv:-}" ]]; then
+      _t="$(sed 's/\r//g' "$txt_ocr" | sed ':a;N;$!ba;s/\n/\\n/g')"
+      _t="${_t//\"/\"\"}"
+      printf '"%s",%d,"%s","%s",%s\n' "$file" 1 "$_t" "ocr" true >> "$csv"
+    fi
+    exit 0
+  fi
+fi
+
+log_warn "PDF produced too little text after OCR: $bn"
+exit 1
