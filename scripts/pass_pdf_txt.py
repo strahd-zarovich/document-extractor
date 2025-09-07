@@ -1,83 +1,69 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Pass 1 — Text-layer extraction with reliability gating.
-Exit codes:
-  0 = accepted & CSV written
-  3 = likely scan-only (let OCR try)
-  5 = text too weak (let OCR try)
-  4 = extraction error
+Extract native text layer from PDF; compute reliability; decide accept vs escalate.
+API:
+  run(pdf_path, mode="per-doc"|"per-page", cutoff=0.80, logger=None)
+Returns:
+  (True, payload) on accept; (False, None) on reject.
+  payload per-doc: {"text": str, "reliability": float}
+  payload per-page: {"pages": [{"page": int, "text": str, "reliability": float}, ...]}
 """
-from __future__ import annotations
 import os, sys
-import fitz  # PyMuPDF
-from common import (
-    get_logger, CsvWriter, pdf_pages, sample_page_indices,
-    likely_scan_only, score_reliability, median
-)
 
-TXT_RELIABILITY_CUTOFF = float(os.getenv("PASS_TXT_CUTOFF", "0.60"))
-SAMPLES = int(os.getenv("TXT_SAMPLES", "6"))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 
-def main(pdf_path: str, csv_out: str, _json_out: str, _out_dir: str) -> int:
-    run_log = os.getenv("RUN_LOG")
-    log = get_logger(run_log)
-    base = os.path.basename(pdf_path)
+import common
 
-    try:
-        doc = fitz.open(pdf_path)
-    except Exception as e:
-        log.error(f"TXT open failed: {base}: {e}")
-        return 4
-
-    n = int(pdf_pages(doc))
-    if n <= 0:
-        log.info("TXT summary: pages=0 chars=0 median=0.00")
-        return 5
-
-    # quick scan-only probe (sample a few pages by lengths)
-    idx = sample_page_indices(n, min(3, n))
-    sample_lens = []
-    for i in idx:
+def _per_page(pdf_path, logger):
+    total_pages = common.pdf_page_count(pdf_path)
+    pages = []
+    for i in range(total_pages):
         try:
-            t = doc.load_page(i).get_text("text", sort=True)
-        except Exception:
-            t = ""
-        sample_lens.append(len(t))
+            text = common.extract_text_layer(pdf_path, i) or ""
+        except Exception as e:
+            if logger: logger.warning(f"TXT extract error @page={i+1}: {e}")
+            text = ""
+        rel = common.score_reliability(text)
+        pages.append({"page": i + 1, "text": text, "reliability": rel})
+    return pages
 
-    if likely_scan_only(sample_lens):
-        log.info(f"TXT skipped (scan-only likely): {base}")
-        return 3
+def run(pdf_path: str, mode: str = "per-doc", cutoff: float = 0.80, logger=None):
+    total_pages = common.pdf_page_count(pdf_path)
 
-    # full text and reliability per page
-    texts, lens = [], []
-    for i in range(n):
-        try:
-            t = doc.load_page(i).get_text("text", sort=True)
-        except Exception:
-            t = ""
-        texts.append(t)
-        lens.append(len(t))
-
-    rel = [score_reliability(t) for t in texts]
-    med = median(rel)
-    total_chars = sum(lens)
-    log.info(f"TXT summary: pages={n} chars={total_chars} median={med:.2f}")
-
-    if med >= TXT_RELIABILITY_CUTOFF:
-        cw = CsvWriter(csv_out, logger=log)
-        cw.row(base, "", "".join(texts), "pdf_text", False, reliability=med)
-        cw.close()
-        log.info(f"Wrote CSV for {base} (method=pdf_text, used_ocr=false)")
-        return 0
-
-    return 5
-
-if __name__ == "__main__":
-    log = get_logger(os.getenv("RUN_LOG"))
+    # Quick triage (optional): if clearly scan-only, short-circuit to OCR by returning reject
+    # Use project's helper if present
     try:
-        sys.exit(main(*sys.argv[1:]))
-    except SystemExit:
-        raise
+        sample_idxs = common.sample_page_indices(total_pages, target=min(6, total_pages))
+        samples = []
+        for idx in sample_idxs:
+            try:
+                t = common.extract_text_layer(pdf_path, idx) or ""
+            except Exception:
+                t = ""
+            samples.append(t)
+        if hasattr(common, "likely_scan_only") and common.likely_scan_only(samples):
+            if logger: logger.info("TXT triage: likely scan-only -> reject to OCR")
+            return (False, None)
     except Exception:
-        log.exception("Unhandled error in %s", os.path.basename(__file__))
-        sys.exit(1)
+        pass  # sampling is best-effort
+
+    # Full extraction
+    pages = _per_page(pdf_path, logger)
+    if mode == "per-page":
+        # accept only if median(page rel) meets cutoff
+        med = common.median([p["reliability"] for p in pages]) if pages else 0.0
+        if logger: logger.info(f"TXT summary: pages={len(pages)} median={med:.2f} cutoff={cutoff}")
+        if med >= cutoff:
+            return (True, {"pages": pages})
+        return (False, None)
+
+    # per-doc: concatenate text, compute overall median reliability
+    doc_text = "\n".join(p["text"] for p in pages)
+    med = common.median([p["reliability"] for p in pages]) if pages else 0.0
+    if logger: logger.info(f"TXT summary: pages={len(pages)} median={med:.2f} cutoff={cutoff}")
+    if med >= cutoff:
+        return (True, {"text": doc_text, "reliability": med})
+    return (False, None)

@@ -45,6 +45,9 @@ COPY entrypoint.sh /app/
 COPY config.conf /app/defaults/config.conf
 COPY scripts/ /app/scripts/
 
+# After copying your app into /app
+RUN chmod -R a+rX /app
+
 # Make scripts executable and set initial perms
 RUN chmod +x /app/entrypoint.sh && \
     find /app/scripts -type f -exec chmod +x {} \; && \

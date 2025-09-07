@@ -158,6 +158,10 @@ class CsvWriter:
         )
         self._fh.flush()
 
+    # Back-compat alias: newer passes call write_row(...)
+    def write_row(self, filename, page, text, method, used_ocr, reliability=None):
+        return self.row(filename, page, text, method, used_ocr, reliability)
+
     def close(self) -> None:
         try:
             self._fh.close()

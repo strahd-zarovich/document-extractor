@@ -1,183 +1,140 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-IFS=$'\n\t'
 
-# -------- Defaults (overridable via env) --------
-: "${INPUT_DIR:=/data/input}"
-: "${OUTPUT_DIR:=/data/output}"
-: "${WORK_DIR:=/tmp/work}"
-: "${LOG_DIR:=/data/logs}"
-: "${RUNTIME_CFG_DIR:=/data/config}"
-
-: "${INPUT_CHECK_INTERVAL:=15s}"   # used by 'sleep'; supports "15s"
-: "${INPUT_STABLE_SECS:=15}"       # used by inotifywait -t; must be integer seconds
-
-: "${LOG_LEVEL:=INFO}"
-: "${PUID:=99}"
-: "${PGID:=100}"
-: "${UMASK:=0002}"
-umask "$UMASK"
-
-# Python runtime
-export PYTHONUNBUFFERED=1
-export PYTHONPATH=/app/scripts
-
-# -------- Tiny logger --------
-log() { printf '[%(%Y-%m-%d %H:%M:%S)T] [%s] %s\n' -1 "${1:-INFO}" "${*:2}"; }
-
-# -------- Ensure /data tree exists & is writable --------
-ensure_data_tree() {
-  local created=0
-  for d in "$INPUT_DIR" "$OUTPUT_DIR" "$LOG_DIR" "$RUNTIME_CFG_DIR" "$WORK_DIR"; do
-    if [[ ! -d "$d" ]]; then mkdir -p "$d" && created=1; fi
-  done
-  chown -R "$PUID:$PGID" "$INPUT_DIR" "$OUTPUT_DIR" "$LOG_DIR" "$RUNTIME_CFG_DIR" "$WORK_DIR" 2>/dev/null || true
-  chmod -R g+rwX         "$INPUT_DIR" "$OUTPUT_DIR" "$LOG_DIR" "$RUNTIME_CFG_DIR" "$WORK_DIR" 2>/dev/null || true
-  if [[ $created -eq 1 ]]; then log INFO "Initialized data tree"; fi
-  # writability probe (warn if bad)
-  if ! sh -c "umask $UMASK; : > '$INPUT_DIR/.writable'"; then
-    log ERROR "INPUT_DIR not writable: $INPUT_DIR (check volume mapping & PUID/PGID)"
-  else
-    rm -f "$INPUT_DIR/.writable"
+# ---------- Logging (must be defined before first use) ----------
+log() {
+  local level="${1:-INFO}"; shift || true
+  local ts
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  echo "[$ts] [$level] $*"
+  if [[ -n "${LOG_DIR:-}" ]]; then
+    mkdir -p "$LOG_DIR" 2>/dev/null || true
+    printf "[%s] [%s] %s\n" "$ts" "$level" "$*" >> "$LOG_DIR/docker.log" 2>/dev/null || true
   fi
 }
 
-# Prepare dirs before we tee logs
-ensure_data_tree
-
-# Mirror stdout/stderr to persistent file as well
-exec > >(tee -a "$LOG_DIR/docker.log") 2>&1
-
-# -------- Optional runtime config file --------
-IMAGE_DEFAULT_CFG="/app/defaults/config.conf"
-RUNTIME_CFG_FILE="${RUNTIME_CFG_DIR}/config.conf"
-mkdir -p "${RUNTIME_CFG_DIR}"
-if [[ ! -f "${RUNTIME_CFG_FILE}" && -f "${IMAGE_DEFAULT_CFG}" ]]; then
-  cp -f "${IMAGE_DEFAULT_CFG}" "${RUNTIME_CFG_FILE}"
+# ---------- Resolve this script's absolute path (no hard-coded /app/...) ----------
+SCRIPT_SELF="${BASH_SOURCE[0]:-$0}"
+if [[ "${SCRIPT_SELF:0:1}" != "/" ]]; then
+  SCRIPT_SELF="$(pwd)/$SCRIPT_SELF"
 fi
-[[ -f "${RUNTIME_CFG_FILE}" ]] && sed -i 's/\r$//' "${RUNTIME_CFG_FILE}" || true
+SCRIPT_DIR="$(cd -P -- "$(dirname -- "$SCRIPT_SELF")" && pwd)"
+SCRIPT_SELF="$SCRIPT_DIR/$(basename -- "$SCRIPT_SELF")"
 
-log INFO "Startup settings: INPUT_DIR=$INPUT_DIR OUTPUT_DIR=$OUTPUT_DIR WORK_DIR=$WORK_DIR LOG_DIR=$LOG_DIR LOG_LEVEL=${LOG_LEVEL:-INFO} INPUT_CHECK_INTERVAL=$INPUT_CHECK_INTERVAL PUID=$PUID PGID=$PGID UMASK=$UMASK"
+# ---------- Config (defaults) ----------
+INPUT_DIR="${INPUT_DIR:-/data/input}"
+OUTPUT_DIR="${OUTPUT_DIR:-/data/output}"
+WORK_DIR="${WORK_DIR:-/data/tmp}"
+LOG_DIR="${LOG_DIR:-/data/logs}"
 
-wait_for_quiescence() {
-  local dir="$1"; local idle="${2:-15}"
-  # If the dir is missing, create it and treat as quiescent
-  [[ -d "$dir" ]] || { mkdir -p "$dir"; return 0; }
-  while true; do
-    # inotifywait exit codes: 0=event, 1=error, 2=timeout (i.e., idle for the whole -t)
-    inotifywait -q -r -t "$idle" -e close_write,move,create,delete "$dir" >/dev/null 2>&1
-    rc=$?
-    if [[ $rc -eq 2 ]]; then
-      log_info "Input idle for ${idle}s — proceeding."
-      return 0
-    fi
-    # saw activity → loop and wait again
-    log_debug "Input changed; waiting ${idle}s of quiet..."
-  done
-}
+INPUT_STABLE_SECS="${INPUT_STABLE_SECS:-15}"
+INPUT_CHECK_INTERVAL="${INPUT_CHECK_INTERVAL:-15}"
 
-# -------- Helpers --------
+PUID="${PUID:-99}"
+PGID="${PGID:-100}"
+UMASK="${UMASK:-0002}"
 
-# Safe run-name builder: ignores dotfiles; guarantees non-empty rn
-build_run_name() {
-  # $1 = top-level filename (basename only)
-  local b="$1" stem
-  [[ -z "$b" || "$b" = .* ]] && { echo ""; return; }                # dotfiles/empty -> invalid
-  stem="${b%.*}"
-  [[ -z "$stem" ]] && stem="run-$(date +%s)"
-  # strip trailing dots/spaces
-  stem="${stem%%*( )}"
-  stem="${stem%%.}"
-  [[ -z "$stem" ]] && stem="run-$(date +%s)"
-  echo "$stem"
-}
+PASS_TXT_CUTOFF="${PASS_TXT_CUTOFF:-0.75}"
+PASS_DOC_CUTOFF="${PASS_DOC_CUTOFF:-0.75}"
+PASS_OCR_A_CUTOFF="${PASS_OCR_A_CUTOFF:-0.65}"
+PASS_OCR_B_CUTOFF="${PASS_OCR_B_CUTOFF:-0.55}"
+BIGPDF_SIZE_LIMIT_MB="${BIGPDF_SIZE_LIMIT_MB:-50}"
+BIGPDF_PAGE_LIMIT="${BIGPDF_PAGE_LIMIT:-500}"
 
-make_runs_from_top_files() {
-  shopt -s nullglob
-  for f in "$INPUT_DIR"/*; do
-    [[ -f "$f" ]] || continue
-    local base rn dest
-    base="$(basename "$f")"
-    rn="$(build_run_name "$base")"
-    [[ -z "$rn" ]] && { log DEBUG "Skipping top-level file '$base' (ignored)"; continue; }
-    dest="$INPUT_DIR/$rn"
-    mkdir -p "$dest"
-    mv -f -- "$f" "$dest/$base"
-    log INFO "Top-level file detected. Created run '$rn' and moved '$base'."
-  done
-}
+# ---------- Prepare directories & perms ----------
+mkdir -p "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR"
+umask "$UMASK"
+chown -R "${PUID}:${PGID}" "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" || true
 
-derive_run_names() {
-  shopt -s nullglob
-  # list only 1st-level subdirs (never the root)
-  find "$INPUT_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort -u
-}
+# Ensure the running script and its directory are traversable by unprivileged user
+chmod a+rx "$SCRIPT_DIR" "$SCRIPT_SELF" || true
+# Best-effort: if these exist, make them traversable too (harmless if absent)
+[[ -d /app ]] && chmod a+rx /app || true
+[[ -d /app/scripts ]] && chmod a+rx /app/scripts || true
 
-process_run() {
-  local rn="$1"
-  local IN="$INPUT_DIR/$rn"
-  local OUT="$OUTPUT_DIR/$rn"
-  local TMP="$WORK_DIR/$rn"
-  local RUNLOG="$OUT/run.log"
-
-  # Guard against empty/invalid run name (never touch the input root)
-  if [[ -z "${rn:-}" || "$IN" = "$INPUT_DIR" ]]; then
-    log DEBUG "Skipping invalid run name silently"
-    return 0
+# ---------- Drop privileges once (if running as root and gosu available) ----------
+if [[ -z "${RUN_AS_HELPER:-}" && "$(id -u)" == "0" ]]; then
+  if command -v gosu >/dev/null 2>&1; then
+    export RUN_AS_HELPER=1
+    exec gosu "${PUID}:${PGID}" /usr/bin/env bash "$SCRIPT_SELF"
+  else
+    log WARNING "gosu not found; continuing as root. Prefer setting container user to 99:100 or install gosu."
   fi
+fi
 
-  mkdir -p "$OUT" "$TMP"
-  chown -R "$PUID:$PGID" "$OUT" "$TMP" 2>/dev/null || true
+# ---------- Startup echo ----------
+log INFO "Startup config:"
+log INFO "  INPUT_DIR=$INPUT_DIR"
+log INFO "  OUTPUT_DIR=$OUTPUT_DIR"
+log INFO "  WORK_DIR=$WORK_DIR"
+log INFO "  LOG_DIR=$LOG_DIR"
+log INFO "  PUID=$PUID PGID=$PGID UMASK=$UMASK"
+log INFO "  STABLE_SECS=$INPUT_STABLE_SECS CHECK_INTERVAL=$INPUT_CHECK_INTERVAL"
+log INFO "  CUT_OFFS: TXT=$PASS_TXT_CUTOFF DOC=$PASS_DOC_CUTOFF OCR_A=$PASS_OCR_A_CUTOFF OCR_B=$PASS_OCR_B_CUTOFF"
+log INFO "  BIGPDF thresholds: SIZE_MB=$BIGPDF_SIZE_LIMIT_MB PAGES=$BIGPDF_PAGE_LIMIT"
 
-  export RUN_NAME="$rn" RUN_PATH="$IN" OUT_PATH="$OUT" TMP_PATH="$TMP" RUN_LOG="$RUNLOG" LOG_LEVEL
+python3 - <<'PY' 2>/dev/null || true
+import importlib
+def v(m):
+    try:
+        mod = importlib.import_module(m)
+        return getattr(mod, '__version__', 'unknown')
+    except Exception:
+        return 'missing'
+print(f"[VERSIONS] PyMuPDF={v('fitz')} pdfminer={v('pdfminer')} Pillow={v('PIL')} pytesseract={v('pytesseract')}")
+PY
 
-  # single-run lock
-  local LOCK="$TMP/.run.lock"
-  if ! ( set -o noclobber; echo $$ > "$LOCK") 2>/dev/null; then
-    log INFO "Run already in progress; skipping: $rn"
-    return 0
-  fi
-  trap 'rm -f "$LOCK"' RETURN
-
-  log INFO "Run start: $rn"
-
-  # Run the Python orchestrator; ignore its RC (it does per-file quarantine itself)
-  /app/scripts/process_run.sh 2>>"$LOG_DIR/python_errors.log" \
-    || log WARN "process_run returned non-zero for $rn (ignored; file-level quarantine handled by processor)"
-
-  # After processing, prune the run dir if it is now empty (never touch input root)
-  if [[ -d "$IN" ]] && [[ -z "$(ls -A "$IN")" ]]; then
-    rmdir "$IN" 2>/dev/null || true
-  fi
-
-  log INFO "Run end: $rn"
-
-  chown -R "$PUID:$PGID" "$OUT" "$TMP" "$OUTPUT_DIR" "$LOG_DIR" 2>/dev/null || true
-}
-
-# -------- Main loop --------
+# ---------- Main watcher loop ----------
+log INFO "Watcher starting as $(id -u):$(id -g); waiting for input quiescence..."
 while true; do
-  # self-heal if the host/share dropped the folder
-  [[ -d "$INPUT_DIR" ]] || mkdir -p "$INPUT_DIR"
-  ensure_data_tree
-
-  make_runs_from_top_files
-
-  mapfile -t runs < <(derive_run_names || true)
-  for rn in "${runs[@]}"; do
-    # process only if the run dir contains at least one file
-    if find "$INPUT_DIR/$rn" -mindepth 1 -type f -print -quit | grep -q .; then
-      process_run "$rn"
-    else
-      # remove empty run dirs (never the input root)
-      rmdir "$INPUT_DIR/$rn" 2>/dev/null || true
+  # Quiescence wait
+  if command -v inotifywait >/dev/null 2>&1; then
+    if inotifywait -q -t "$INPUT_STABLE_SECS" -r -e modify,move,create,delete "$INPUT_DIR"; then
+      sleep 1
+      continue
     fi
-  done
-
-  # prune *only* empty subdirs under input (guard root with mindepth)
-  if [[ -d "$INPUT_DIR" ]]; then
-    find "$INPUT_DIR" -mindepth 1 -maxdepth 1 -type d -empty -exec rmdir {} \; 2>/dev/null || true
+  else
+    sleep "$INPUT_STABLE_SECS"
   fi
+
+  shopt -s nullglob
+  entries=("$INPUT_DIR"/*)
+  shopt -u nullglob
+
+  if [[ ${#entries[@]} -eq 0 ]]; then
+    sleep "$INPUT_CHECK_INTERVAL"
+    continue
+  fi
+
+  for item in "${entries[@]}"; do
+    base="$(basename "$item")"
+    [[ "$base" == "." || "$base" == ".." ]] && continue
+
+    if [[ -f "$item" ]]; then
+      run_name="${base%.*}"
+      run_dir="$INPUT_DIR/$run_name"
+      mkdir -p "$run_dir"
+      mv -f "$item" "$run_dir/"
+      log INFO "Created run from file: $base -> $run_name"
+    elif [[ -d "$item" ]]; then
+      run_dir="$item"
+      run_name="$base"
+      log INFO "Found run directory: $run_name"
+    else
+      continue
+    fi
+
+    run_out_dir="$OUTPUT_DIR/$run_name"
+    run_log="$run_out_dir/run.log"
+    mkdir -p "$run_out_dir"
+
+    export INPUT_DIR OUTPUT_DIR WORK_DIR LOG_DIR \
+           PASS_TXT_CUTOFF PASS_DOC_CUTOFF PASS_OCR_A_CUTOFF PASS_OCR_B_CUTOFF \
+           BIGPDF_SIZE_LIMIT_MB BIGPDF_PAGE_LIMIT
+
+    log INFO "Process run: $run_name"
+    python3 /app/scripts/process_run.py "$run_dir" "$run_out_dir" "$run_log" || true
+  done
 
   sleep "$INPUT_CHECK_INTERVAL"
 done

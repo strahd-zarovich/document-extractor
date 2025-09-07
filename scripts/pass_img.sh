@@ -1,49 +1,38 @@
 #!/usr/bin/env bash
-# pass_img.sh — Standalone image OCR (CSV-only)
-# Args: <file> <csv_out> <json_out> <out_dir>
-set -Eeuo pipefail
+set -euo pipefail
 
-file="$1"
-csv="$2"
-json="$3"  # unused
-out_dir="$4"
+# Usage:
+#   pass_img.sh <image_path> [csv_path] [run_log_path]
+#
+# Auto mode (only file given):
+#   - /data/output/_adhoc/<stem>/<stem>.csv
+#   - /data/output/_adhoc/<stem>/run.log
+#
+# Calls: pass_img.py <img> <csv> <run.log>
 
-[[ -n "${CONFIG_FILE:-}" && -f "${CONFIG_FILE}" ]] && . "${CONFIG_FILE}"
-# shellcheck disable=SC1091
-. /app/scripts/common.sh
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+IMG_PATH="${1:-}"
 
-IMG_MIN_CHARS=80
-
-# Ensure run CSV header exists
-if [[ -n "${csv:-}" && ! -s "$csv" ]]; then
-  printf 'filename,page,text,method,used_ocr\n' > "$csv"
+if [[ -z "${IMG_PATH}" ]]; then
+  echo "usage: $(basename "$0") <image_path> [csv_path] [run_log_path]" >&2
+  exit 2
 fi
 
-clean_text() { sed 's/\r//g' | sed ':a;N;$!ba;s/\n/\\n/g' | sed 's/"/""/g'; }
-count_chars() { printf '%s' "$1" | tr -d '\n\r\t ' | wc -c | awk '{print $1}'; }
-
-bn="$(basename -- "$file")"
-
-if ! command -v tesseract >/dev/null 2>&1; then
-  log_error "tesseract not available for image OCR: $bn"; exit 1
+if [[ ! -f "$IMG_PATH" ]]; then
+  echo "error: not a file: $IMG_PATH" >&2
+  exit 2
 fi
 
-txt="$(tesseract "$file" stdout -l eng --oem 1 --psm 6 -c tessedit_do_invert=1 2>/dev/null || true)"
-cleaned="$(printf '%s' "$txt" | clean_text)"
-c="$(count_chars "$cleaned")"
+STEM="$(basename "${IMG_PATH%.*}")"
 
-if (( c < IMG_MIN_CHARS )); then
-  # retry with psm 3
-  txt="$(tesseract "$file" stdout -l eng --oem 1 --psm 3 -c tessedit_do_invert=1 2>/dev/null || true)"
-  cleaned="$(printf '%s' "$txt" | clean_text)"
-  c="$(count_chars "$cleaned")"
+CSV_PATH="${2:-}"
+RUN_LOG="${3:-}"
+
+if [[ -z "$CSV_PATH" || -z "$RUN_LOG" ]]; then
+  OUT_BASE="/data/output/_adhoc/${STEM}"
+  mkdir -p "$OUT_BASE"
+  CSV_PATH="${CSV_PATH:-${OUT_BASE}/${STEM}.csv}"
+  RUN_LOG="${RUN_LOG:-${OUT_BASE}/run.log}"
 fi
 
-if (( c < IMG_MIN_CHARS )); then
-  log_warn "Image OCR produced too little text ($c): $bn"
-  exit 1
-fi
-
-printf '"%s",1,"%s","%s",%s\n' "$file" "$cleaned" "img_ocr" true >> "$csv"
-log_info "Image OCR complete: $bn (chars=$c)"
-exit 0
+python3 "${SCRIPT_DIR}/pass_img.py" "$IMG_PATH" "$CSV_PATH" "$RUN_LOG"

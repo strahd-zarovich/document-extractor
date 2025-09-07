@@ -1,198 +1,129 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-pass_doc.py — DOC/DOCX extraction with reliability + image OCR fallback for DOCX.
+DOC/DOCX pass:
+ - Extracts native text from .docx (python-docx) and .doc (antiword -> catdoc fallback)
+ - Computes reliability and writes a single CSV row (per-document)
+ - Accepts if reliability >= PASS_DOC_CUTOFF (default 0.75); else returns non-zero to trigger quarantine
 
-Usage:
-  pass_doc.py <path> <csv_out> <json_out> <out_dir>
-Exit codes:
-  0 = accepted (CSV rows written)
-  1 = weak after all attempts (caller may route to Manual Review)
-  2 = usage
- 10 = hard skip (missing tools, unreadable), caller decides
+Args:
+  1: path to DOC/DOCX file
+  2: path to CSV for this run
+  3: path to run.log
 
-Env cutoffs (tweakable):
-  DOCX_CUTOFF         default 0.60  (native text acceptance)
-  DOC_IMG_OCR_CUTOFF  default 0.50  (per-image OCR acceptance)
-  DOC_IMG_MAX         default 12    (cap images OCR’d)
+Env:
+  PASS_DOC_CUTOFF (float, default 0.75)
+  LOG_LEVEL (INFO/DEBUG), optional
 """
+import os
+import sys
+import subprocess
+from typing import Optional
 
-from __future__ import annotations
-import os, sys, io, zipfile, subprocess
-from typing import List, Tuple
-from PIL import Image
-from common import get_logger, CsvWriter, score_reliability
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 
-# Try python-docx (apt: python3-docx or pip: python-docx)
-try:
-    import docx  # type: ignore
-except Exception:  # docx may be missing; we handle gracefully for .doc path
-    docx = None
+import common  # shared logger, CsvWriter, score_reliability
 
-DOCX_CUTOFF        = float(os.getenv("DOCX_CUTOFF", "0.60"))
-DOC_IMG_OCR_CUTOFF = float(os.getenv("DOC_IMG_OCR_CUTOFF", "0.50"))
-DOC_IMG_MAX        = int(os.getenv("DOC_IMG_MAX", "12"))
-
-def _read_all(fpath: str) -> str:
-    with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
-        return fh.read()
-
-def _docx_extract_text(path: str) -> str:
-    if docx is None:
-        return ""
-    d = docx.Document(path)
-    parts: List[str] = []
-
-    # body paragraphs
-    for p in d.paragraphs:
-        if p.text: parts.append(p.text)
-
-    # tables
-    for table in d.tables:
-        for row in table.rows:
-            cells = [cell.text for cell in row.cells]
-            if any(cells):
-                parts.append("\t".join(cells))
-
-    # headers/footers (all sections)
+def _env_float(name: str, default: float) -> float:
     try:
-        for sec in d.sections:
-            for p in sec.header.paragraphs:
-                if p.text: parts.append(p.text)
-            for p in sec.footer.paragraphs:
-                if p.text: parts.append(p.text)
+        return float(os.getenv(name, str(default)))
     except Exception:
-        pass
+        return default
 
+def _docx_text(path: str) -> str:
+    # Extract paragraphs + table cell text
+    try:
+        import docx  # python-docx
+    except Exception as e:
+        raise RuntimeError(f"python-docx not available: {e}")
+
+    try:
+        d = docx.Document(path)
+    except Exception as e:
+        raise RuntimeError(f"docx open failed: {e}")
+
+    parts = []
+    # paragraphs
+    for p in d.paragraphs:
+        if p.text:
+            parts.append(p.text)
+    # tables
+    for t in d.tables:
+        try:
+            for row in t.rows:
+                for cell in row.cells:
+                    if cell.text:
+                        parts.append(cell.text)
+        except Exception:
+            # table iteration is best-effort
+            pass
     return "\n".join(parts)
 
-def _docx_extract_images(path: str) -> List[Image.Image]:
-    imgs: List[Image.Image] = []
+def _run_cmd(cmd: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+def _doc_text(path: str) -> str:
+    # Prefer antiword; fallback to catdoc if present
     try:
-        with zipfile.ZipFile(path, "r") as zf:
-            names = [n for n in zf.namelist() if n.startswith("word/media/")]
-            for n in names[:DOC_IMG_MAX]:
-                try:
-                    data = zf.read(n)
-                    img = Image.open(io.BytesIO(data)).convert("L")
-                    # small upsample if very tiny
-                    if min(img.size) < 600:
-                        w, h = img.size
-                        img = img.resize((w*2, h*2))
-                    imgs.append(img)
-                except Exception:
-                    continue
-    except Exception:
+        cp = _run_cmd(["antiword", path])
+        if cp.returncode == 0 and cp.stdout:
+            return cp.stdout
+    except FileNotFoundError:
+        pass  # antiword not installed
+
+    # Fallback: catdoc
+    try:
+        cp = _run_cmd(["catdoc", path])
+        if cp.returncode == 0 and cp.stdout:
+            return cp.stdout
+    except FileNotFoundError:
         pass
-    return imgs
 
-def _run_cmd(cmd: List[str]) -> Tuple[int, str]:
+    raise RuntimeError("Neither antiword nor catdoc produced text")
+
+def main():
+    if len(sys.argv) < 4:
+        print("usage: pass_doc.py <doc|docx_path> <csv_path> <run_log_path>", file=sys.stderr)
+        sys.exit(2)
+
+    in_path, csv_path, run_log_path = sys.argv[1], sys.argv[2], sys.argv[3]
+    basename = os.path.basename(in_path)
+    ext = os.path.splitext(in_path)[1].lower()
+
+    logger = common.get_logger(run_log_path)
+    writer = common.CsvWriter(csv_path)
+
+    cutoff = _env_float("PASS_DOC_CUTOFF", 0.75)
+
+    # Extract
     try:
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-        out = p.stdout.decode("utf-8", "ignore")
-        return p.returncode, out
+        if ext == ".docx":
+            method = "docx_text"
+            text = _docx_text(in_path)
+        elif ext == ".doc":
+            method = "doc_text"
+            text = _doc_text(in_path)
+        else:
+            logger.error(f"pass_doc called with unsupported extension: {ext}")
+            sys.exit(2)
     except Exception as e:
-        return 127, f"{e}"
+        logger.error(f"DOC open/extract failed: {basename} :: {e}")
+        sys.exit(1)
 
-def _doc_antiword(path: str) -> str:
-    rc, out = _run_cmd(["antiword", "-m", "UTF-8.txt", path])
-    if rc == 0 and out.strip():
-        return out
-    # fallback: catdoc if available
-    rc2, out2 = _run_cmd(["bash", "-lc", f"command -v catdoc >/dev/null 2>&1 && catdoc -dutf-8 -w {sh_quote(path)} || exit 127"])
-    if rc2 == 0 and out2.strip():
-        return out2
-    return ""
+    # Reliability (per-document)
+    rel = common.score_reliability(text or "")
+    logger.info(f"DOC summary: {basename} method={method} reliability={rel:.2f} cutoff={cutoff}")
 
-def sh_quote(s: str) -> str:
-    return "'" + s.replace("'", "'\"'\"'") + "'"
+    # Gate & write
+    if rel >= cutoff and (text or "").strip():
+        writer.write_row(basename, "-", text, method, "false", f"{rel:.2f}")
+        logger.info(f"DOC accept: {basename} reliability={rel:.2f}")
+        sys.exit(0)
 
-def _ocr_image(img: Image.Image) -> str:
-    try:
-        import pytesseract
-    except Exception:
-        return ""
-    try:
-        return pytesseract.image_to_string(img, lang="eng", config="--oem 1 --psm 6")
-    except Exception:
-        return ""
-
-def main(path: str, csv_out: str, _json_out: str, _out_dir: str) -> int:
-    log = get_logger(os.getenv("RUN_LOG"))
-    base = os.path.basename(path)
-    ext = os.path.splitext(base)[1].lower()
-
-    # prepare CSV
-    cw = CsvWriter(csv_out, logger=log)
-
-    if ext == ".docx":
-        if docx is None:
-            log.warn(f"python-docx not available; cannot parse DOCX natively: {base}")
-            imgs = _docx_extract_images(path)  # still try OCR on images via zip
-            accepted = 0
-            for idx, im in enumerate(imgs, start=1):
-                txt = _ocr_image(im)
-                rel = score_reliability(txt)
-                if rel >= DOC_IMG_OCR_CUTOFF and txt.strip():
-                    cw.row(base, f"img{idx}", txt, "docx_img_ocr", True, reliability=rel)
-                    accepted += 1
-            if accepted > 0:
-                log.info(f"DOCX accepted via image OCR: pages={accepted}")
-                return 0
-            return 1
-
-        # Native text
-        text = _docx_extract_text(path)
-        rel = score_reliability(text)
-        log.info(f"DOCX native summary: chars={len(text)} rel={rel:.2f}")
-        if rel >= DOCX_CUTOFF and text.strip():
-            cw.row(base, "", text, "docx_native", False, reliability=rel)
-            log.info(f"DOCX native accepted: {base}")
-            return 0
-
-        # Fallback: OCR embedded images
-        imgs = _docx_extract_images(path)
-        accepted = 0
-        for idx, im in enumerate(imgs, start=1):
-            txt = _ocr_image(im)
-            reli = score_reliability(txt)
-            if reli >= DOC_IMG_OCR_CUTOFF and txt.strip():
-                cw.row(base, f"img{idx}", txt, "docx_img_ocr", True, reliability=reli)
-                accepted += 1
-
-        if accepted > 0:
-            log.info(f"DOCX accepted via image OCR: images_passed={accepted}")
-            return 0
-
-        log.warn(f"DOCX below cutoff after native+OCR: {base}")
-        return 1
-
-    elif ext == ".doc":
-        text = _doc_antiword(path)
-        rel = score_reliability(text)
-        log.info(f"DOC (antiword) summary: chars={len(text)} rel={rel:.2f}")
-        if rel >= float(os.getenv("DOC_CUTOFF", "0.55")) and text.strip():
-            cw.row(base, "", text, "doc_native", False, reliability=rel)
-            log.info(f"DOC accepted via antiword: {base}")
-            return 0
-        if text.strip():
-            # weak text, still write a row so you see something (optional); comment out if not wanted
-            cw.row(base, "", text, "doc_native_weak", False, reliability=rel)
-        log.warn(f"DOC below cutoff after antiword (and catdoc fallback if present): {base}")
-        return 1
-
-    else:
-        log.warn(f"pass_doc.py called on unsupported extension: {base}")
-        return 10
+    logger.warning(f"DOC below cutoff: {basename} reliability={rel:.2f} < {cutoff}")
+    sys.exit(1)
 
 if __name__ == "__main__":
-    import sys, os
-    from common import get_logger
-    # Use RUN_LOG when present, else global fallback file
-    log = get_logger(os.getenv("RUN_LOG"))
-    try:
-        sys.exit(main(*sys.argv[1:]))
-    except SystemExit as e:
-        raise
-    except Exception:
-        log.exception("Unhandled error in %s", os.path.basename(__file__))
-        sys.exit(1)
+    main()
