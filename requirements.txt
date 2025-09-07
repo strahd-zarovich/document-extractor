@@ -1,0 +1,4 @@
+pymupdf==1.24.9
+pillow==10.4.0
+pytesseract==0.3.13
+pdfminer.six==20231228

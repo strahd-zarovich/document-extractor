@@ -14,24 +14,33 @@ RUN apt-get update && apt-get install -y \
     bash \
     python3 \
     python3-pip \
+    python3-pil \
+    python3-docx \
+    python3-pdfminer \
+    python3-lxml \
     tesseract-ocr \
     tesseract-ocr-eng \
     poppler-utils \
+    antiword \
     file \
     curl \
     unzip \
     gnupg \
     gosu \
     fonts-dejavu \
-	fonts-liberation2 \
+    fonts-liberation2 \
     inotify-tools \
-    python3-lxml \
-    python3-docx \
-    python3-pdfminer \
+    mupdf-tools \
   && rm -rf /var/lib/apt/lists/*
+
+# Packages not available in Debian’s repo → use pip
+RUN pip3 install --no-cache-dir --break-system-packages \
+    PyMuPDF==1.25.4 \    
+    pytesseract==0.3.13
 
 # App files
 COPY entrypoint.sh /app/
+
 # Ship a default config INSIDE the image; runtime config will live in /data/config
 COPY config.conf /app/defaults/config.conf
 COPY scripts/ /app/scripts/

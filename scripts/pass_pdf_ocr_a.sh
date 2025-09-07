@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 : "${LOG_DIR:=/data/logs}"; mkdir -p "$LOG_DIR"
-exec python3 /app/scripts/process_run.py "$@" 2>>"$LOG_DIR/python_errors.log"
+exec python3 /app/scripts/pass_pdf_ocr_a.py "$@" 2>>"$LOG_DIR/python_errors.log"

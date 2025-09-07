@@ -1,55 +1,42 @@
 #!/usr/bin/env bash
+# pass_txt.sh — normalize plain text files into the run CSV (no TXT artifacts)
+# Args: <file> <csv_out> <json_out> <out_dir>
 set -Eeuo pipefail
 
-# Args
 file="$1"
 csv="$2"
-json="$3"
-out_path="$4"
+json="$3"   # unused (signature preserved)
+out_dir="$4"
 
-# Runtime config & logging
-if [[ -n "${CONFIG_FILE:-}" && -f "${CONFIG_FILE}" ]]; then
-  # shellcheck disable=SC1090
-  . "${CONFIG_FILE}"
-fi
+# Load config & logging (if present)
+[[ -n "${CONFIG_FILE:-}" && -f "${CONFIG_FILE}" ]] && . "${CONFIG_FILE}"
 # shellcheck disable=SC1091
 . /app/scripts/common.sh
 
-log_debug "TXT ingestion starting: $file"
+# Ensure run CSV header exists (runner should have created it, but be safe)
+if [[ -n "${csv:-}" && ! -s "$csv" ]]; then
+  printf 'filename,page,text,method,used_ocr\n' > "$csv"
+fi
 
-method="plain_text"
-used_ocr=false
-page_num=1
-wrote_any=false
+# Helpers
+clean_text() { sed 's/\r//g' | sed ':a;N;$!ba;s/\n/\\n/g' | sed 's/"/""/g'; }
+count_chars() { printf '%s' "$1" | tr -d '\n\r\t ' | wc -c | awk '{print $1}'; }
 
-# Ensure file is readable; if not, fail
-if [[ ! -r "$file" ]]; then
-  log_warn "TXT not readable: $(basename "$file")"
+bn="$(basename -- "$file")"
+
+# Read file (handle large inputs via streaming)
+if ! cleaned="$(cat -- "$file" | clean_text)"; then
+  log_warn "Failed to read TXT: $bn"
   exit 1
 fi
 
-# Emit NON-BLANK lines only
-while IFS= read -r line || [[ -n "$line" ]]; do
-  # skip blank/whitespace-only lines
-  [[ -z "${line//[[:space:]]/}" ]] && continue
-
-  # CSV (RFC-4180: escape quotes by doubling)
-  safe_csv="${line//\"/\"\"}"
-  printf '"%s",%d,"%s"\n' "$file" "$page_num" "$safe_csv" >> "$csv"
-
-  # JSONL (escape for JSON)
-  safe_json="${line//\\/\\\\}"; safe_json="${safe_json//\"/\\\"}"
-  printf '{"file":"%s","page":%d,"text":"%s","method":"%s","used_ocr":%s}\n' \
-         "$file" "$page_num" "$safe_json" "$method" "$used_ocr" >> "$json"
-
-  wrote_any=true
-  ((page_num++))
-done < "$file"
-
-if [[ "$wrote_any" != true ]]; then
-  log_warn "TXT contained only blank lines after cleaning: $(basename "$file")"
+chars="$(count_chars "$cleaned")"
+if (( chars < 20 )); then
+  log_warn "TXT produced too little text ($chars): $bn"
   exit 1
 fi
 
-log_debug "TXT ingestion completed: $file"
+# Write a single 5-column row; txt is not OCR
+printf '"%s",%d,"%s","%s",%s\n' "$file" 1 "$cleaned" "txt" false >> "$csv"
+log_info "TXT normalized to CSV: $bn (chars=$chars)"
 exit 0
