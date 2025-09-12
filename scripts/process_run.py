@@ -26,6 +26,15 @@ NOISE_DELETE_EXTS = {".wav"}  # auto-delete on sight
 def _ensure_dirs(run_dir: Path, out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "Mandatory Review").mkdir(parents=True, exist_ok=True)
+    # NEW: ensure setgid + group-writable on run output dirs
+    try:
+        os.chmod(out_dir, 0o2775)  # drwxrwsr-x
+    except Exception:
+        pass
+    try:
+        os.chmod(out_dir / "Mandatory Review", 0o2775)
+    except Exception:
+        pass
 
 def _csv_path_for_run(run_name: str, out_dir: Path, single_file_name: str = None) -> Path:
     if single_file_name:
@@ -37,6 +46,11 @@ def _write_header_if_needed(csv_path: Path):
         with csv_path.open("w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(CSV_HEADER)
+        # NEW: ensure group-writable file mode on first creation
+        try:
+            os.chmod(csv_path, 0o664)
+        except Exception:
+            pass
 
 def _append_review_manifest(out_dir: Path, relpath: str, reason: str):
     manifest = out_dir / "review_manifest.csv"
@@ -46,11 +60,17 @@ def _append_review_manifest(out_dir: Path, relpath: str, reason: str):
         if new:
             w.writerow(["filename", "reason"])
         w.writerow([relpath, reason])
+    if new:
+        # NEW: ensure group-writable file mode when first created
+        try:
+            os.chmod(manifest, 0o664)
+        except Exception:
+            pass
 
 def _call_script(script: str, args: List[str]) -> int:
     cmd = [sys.executable, script] + args
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    # Mirror stderr to the console for visibility
+    # Mirror stdout/stderr to the console for visibility
     if proc.stdout:
         print(proc.stdout, end="")
     if proc.stderr:
@@ -121,7 +141,7 @@ def main():
             fpath = Path(root) / fname
             relpath = str(fpath.relative_to(run_dir))
             kind = _route_ext(fpath)
- 
+
             if kind == "noise_delete":
                 logger.info(f"Noise file (auto-delete): {relpath}")
                 try:

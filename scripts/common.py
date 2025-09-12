@@ -40,9 +40,20 @@ def _attach_file_handler(log: logging.Logger, path: str, level: int) -> None:
         ))
         fh.setLevel(level)
         log.addHandler(fh)
+        # v0.1.4: ensure run.log is group-writable
+        try:
+            os.chmod(path, 0o664)
+        except Exception:
+            pass
     except Exception:
         # last resort: print why we couldn't open the file
         print(f"[WARN] could not attach file handler to {path}", file=sys.stderr)
+
+# v0.1.4: ensure run.log is group-writable (UnRAID-friendly)
+try:
+    os.chmod(path, 0o664)   # if your variable is named 'target', use that name
+except Exception:
+    pass
 
 def get_logger(run_log: Optional[str]) -> logging.Logger:
     """
@@ -109,6 +120,17 @@ def apply_unraid_perms(path: str) -> None:
     except Exception:
         pass
 
+def has_workdir_space(work_dir: str, min_bytes: int = 1 << 30) -> bool:
+    """
+    Return True if work_dir has at least min_bytes free (default ~1GB).
+    On error, be permissive (return True) to avoid false negatives.
+    """
+    try:
+        _, _, free = shutil.disk_usage(work_dir)
+        return free >= min_bytes
+    except Exception:
+        return True
+
 # ---------- CSV (auto 5/6 columns) ----------
 
 class CsvWriter:
@@ -138,7 +160,6 @@ class CsvWriter:
             except Exception:
                 self.cols = 6
             if self.cols == 5 and self.log:
-                # warn -> warning (fix deprecated call)
                 self.log.warning(
                     "CSV in legacy 5-column mode; reliability will be appended to "
                     "'method' (e.g., method|rel=0.72)."
@@ -246,157 +267,140 @@ def move_to_manual(file_path: str, out_dir: str, reason: str, note: str = "") ->
 
 # ---------- PDF helpers ----------
 
-def _pdf_page_count_via_pdfinfo(path: str) -> int:
+import subprocess
+
+def _pdf_page_count_via_pdfinfo(pdf_path: str) -> int:
+    """
+    Fallback using Poppler's pdfinfo (installed via poppler-utils).
+    """
     try:
-        out = subprocess.check_output(
-            ["pdfinfo", path], stderr=subprocess.DEVNULL, text=True
-        )
-        for line in out.splitlines():
-            if line.startswith("Pages:"):
+        out = subprocess.check_output(["pdfinfo", pdf_path], stderr=subprocess.DEVNULL)
+        for line in out.decode("utf-8", "ignore").splitlines():
+            if line.lower().startswith("pages:"):
                 return int(line.split(":", 1)[1].strip())
     except Exception:
         pass
     return 0
 
-def pdf_page_count(obj) -> int:
+def pdf_page_count(pdf_path: str) -> int:
     """
-    Return total page count as an INT for:
-      - fitz.Document       -> .page_count
-      - str path to PDF     -> PyMuPDF if available, else pdfinfo
-      - int-like            -> int(obj)
+    Return total number of pages in a PDF.
+    Tries PyMuPDF first, then pdfinfo. Raises if both fail.
     """
-    # fitz.Document-like
-    if hasattr(obj, "page_count"):
-        try:
-            return int(getattr(obj, "page_count"))
-        except Exception:
-            return 0
-
-    # path
-    if isinstance(obj, str):
-        try:
-            import fitz  # type: ignore
-            try:
-                with fitz.open(obj) as d:  # type: ignore
-                    return int(d.page_count)
-            except Exception:
-                pass
-        except Exception:
-            pass
-        return _pdf_page_count_via_pdfinfo(obj)
-
-    # int-like
+    # Try PyMuPDF (preferred)
     try:
-        return int(obj)
+        import fitz  # type: ignore
+        with fitz.open(pdf_path) as doc:
+            n = int(doc.page_count)
+        if n > 0:
+            return n
     except Exception:
-        return 0
+        # fall through to pdfinfo
+        pass
+    n = _pdf_page_count_via_pdfinfo(pdf_path)
+    if n <= 0:
+        raise RuntimeError("could not determine PDF page count")
+    return n
 
-def pdf_pages(obj) -> int:
-    """Back-compat wrapper used by existing passes — returns INT page count."""
-    return pdf_page_count(obj)
-
-def pdf_page_range(obj) -> range:
-    """Convenience helper if you need an iterable of indices [0..n-1]."""
-    return range(pdf_page_count(obj))
-
-# ----- Text-layer extractor for a single page (0-based) ----------------------
-def extract_text_layer(pdf_path: str, page_index: int) -> str:
-    """Return text layer for 0-based page_index using poppler pdftotext."""
-    p = int(page_index) + 1
-    try:
-        out = subprocess.check_output(
-            ["pdftotext", "-layout", "-f", str(p), "-l", str(p), pdf_path, "-"],
-            stderr=subprocess.DEVNULL,
-        )
-        return out.decode("utf-8", "ignore").replace("\r\n", "\n").replace("\r", "\n")
-    except Exception:
-        return ""
-
-# ----- Evenly-spaced sample of pages across a document -----------------------
-def sample_page_indices(total_pages: int, target: int = 10):
+def pdf_pages(pdf_path: str) -> int:
     """
-    Return a 0-based, deduped, ordered list of page indices across the doc.
-    Always includes first and last when target >= 2.
+    Back-compat alias: some callers expect pdf_pages() to return an int count.
     """
-    n = max(1, min(int(target), int(total_pages)))
+    return pdf_page_count(pdf_path)
+
+def pdf_page_range(total_pages: int):
+    """
+    1-based page range helper for callers that iterate pages in human terms.
+    """
+    total = int(max(0, total_pages))
+    return range(1, total + 1)
+
+def _clamp_page_index_for_fitz(page_index_1based: int, total_pages: int) -> int:
+    """
+    Convert a 1-based page index to 0-based for fitz, clamped to [0..total-1].
+    Tolerates accidental 0-based input by bumping 0 -> 1.
+    """
     if total_pages <= 0:
-        return []
-    if n == 1:
-        return [0]
-    step = (total_pages - 1) / (n - 1)
-    idxs = sorted({int(round(i * step)) for i in range(n)})
-    return [min(total_pages - 1, max(0, i)) for i in idxs]
+        return 0
+    p = int(page_index_1based)
+    if p <= 0:
+        p = 1
+    if p > total_pages:
+        p = total_pages
+    return p - 1  # fitz is 0-based
 
-# ---------- Rendering & OCR ----------
-
-def render_page_image(page, dpi: int = 300, rotate: int = 0):
+def extract_text_layer(pdf_path: str, page_index: int) -> str:
     """
-    Render a PyMuPDF page to a grayscale Pillow image.
-    Imported lazily so common.py can import even if fitz/Pillow are missing.
+    Extract *native* text layer for a single page.
+    - Accepts page_index as 1-based (tolerates 0-based; clamps safely).
+    - Uses PyMuPDF; if it fails, returns "" (callers can escalate to OCR).
     """
     try:
         import fitz  # type: ignore
-        from PIL import Image
-    except Exception as e:
-        raise RuntimeError("render_page_image requires PyMuPDF and Pillow") from e
-
-    scale = dpi / 72.0
-    mat = fitz.Matrix(scale, scale)
+    except Exception:
+        return ""
     try:
-        mat = mat.preRotate(rotate)  # older API
-    except AttributeError:
-        mat = mat.prerotate(rotate)  # newer API
-    pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY, alpha=False)
-    return Image.frombytes("L", [pix.width, pix.height], pix.samples)
+        with fitz.open(pdf_path) as doc:
+            total = int(doc.page_count)
+            idx0 = _clamp_page_index_for_fitz(page_index, total)
+            page = doc.load_page(idx0)
+            # 'text' gives reading order; 'blocks'/'rawdict' are noisier here
+            return page.get_text("text") or ""
+    except Exception:
+        return ""
+
+def sample_page_indices(total_pages: int, target: int = 5):
+    """
+    Evenly sample up to 'target' page indices across the document, 1-based.
+    Guarantees unique, sorted indices within [1..total_pages].
+    """
+    n = int(max(0, total_pages))
+    t = int(max(1, target))
+    if n <= t:
+        return list(range(1, n + 1))
+    # Even spacing (1-based)
+    step = n / float(t + 1)
+    picks = sorted({max(1, min(n, int(round(step * i)))) for i in range(1, t + 1)})
+    # Ensure we got exactly t unique indices; if not, pad deterministically
+    while len(picks) < t:
+        for j in range(1, n + 1):
+            if j not in picks:
+                picks.append(j)
+                if len(picks) == t:
+                    break
+    return sorted(picks)
+
+# ---------- OCR helper ----------
 
 def ocr_image(img, lang: str = "eng", psm: int = 6, oem: int = 1) -> str:
     """
-    OCR a Pillow image (or path-like) to text. Tries pytesseract, falls back to CLI.
+    OCR a Pillow image object or a path-like to an image file.
+    Tries pytesseract first; falls back to tesseract CLI. Returns text or "".
     """
-    # Try pytesseract first
+    # Try pytesseract first (fastest when available)
     try:
         import pytesseract  # type: ignore
-        return pytesseract.image_to_string(img, lang=lang, config=f"--oem {oem} --psm {psm}")
+        # Accept PIL.Image.Image directly, otherwise let pytesseract handle the path
+        return pytesseract.image_to_string(
+            img, lang=lang, config=f"--oem {oem} --psm {psm}"
+        )
     except Exception:
         pass
 
-    # Fallback: write to temp PNG and call tesseract CLI
+    # Fallback to CLI: ensure we have a path; if a PIL image, write a temp PNG
+    import subprocess
     from tempfile import NamedTemporaryFile
     try:
-        from PIL import Image
-    except Exception as e:
-        raise RuntimeError("ocr_image requires Pillow or pytesseract") from e
+        from PIL import Image  # type: ignore
+    except Exception:
+        Image = None  # type: ignore
 
-    if isinstance(img, Image.Image):
-        with NamedTemporaryFile(suffix=".png", delete=True) as tf:
-            img.save(tf.name, "PNG")
-            try:
-                out = subprocess.check_output(
-                    [
-                        "tesseract",
-                        tf.name,
-                        "stdout",
-                        "-l",
-                        lang,
-                        "--oem",
-                        str(oem),
-                        "--psm",
-                        str(psm),
-                        "-c",
-                        "tessedit_do_invert=1",
-                    ],
-                    stderr=subprocess.DEVNULL,
-                )
-                return out.decode("utf-8", "ignore")
-            except Exception:
-                return ""
-    else:
-        # assume it's a path-like for CLI call
+    def _tess_stdout(image_path: str) -> str:
         try:
             out = subprocess.check_output(
                 [
                     "tesseract",
-                    str(img),
+                    image_path,
                     "stdout",
                     "-l",
                     lang,
@@ -412,3 +416,18 @@ def ocr_image(img, lang: str = "eng", psm: int = 6, oem: int = 1) -> str:
             return out.decode("utf-8", "ignore")
         except Exception:
             return ""
+
+    # If it's a PIL image, dump to temp file and OCR
+    if Image is not None and hasattr(Image, "Image") and isinstance(img, Image.Image):
+        try:
+            with NamedTemporaryFile(suffix=".png", delete=True) as tf:
+                img.save(tf.name, "PNG")
+                return _tess_stdout(tf.name)
+        except Exception:
+            return ""
+
+    # Otherwise, assume it's a path-like
+    try:
+        return _tess_stdout(str(img))
+    except Exception:
+        return ""

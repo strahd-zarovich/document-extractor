@@ -123,6 +123,16 @@ def main():
         sys.exit(0)
     else:
         logger.info(f"TXT escalate: cutoff={PASS_TXT_CUTOFF}")
+    
+    # v0.1.4: switch to per-page once OCR is required
+    if mode == "per-doc":
+        mode = "per-page"
+        logger.info("Switching to per-page because OCR is required.")
+
+    # v0.1.4 policy: once OCR is required, flip to per-page (unless already per-page)
+    if mode == "per-doc":
+        mode = "per-page"
+        logger.info("Switching to per-page because OCR is required.")
 
     # Before OCR: low-workdir-space guard
     free_mb = _get_free_mb(WORK_DIR)

@@ -44,7 +44,10 @@ BIGPDF_PAGE_LIMIT="${BIGPDF_PAGE_LIMIT:-500}"
 # ---------- Prepare directories & perms ----------
 mkdir -p "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR"
 umask "$UMASK"
-chown -R "${PUID}:${PGID}" "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" || true
+chgrp -R "${PGID}" "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" || true
+chmod -R g+rwX       "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" || true
+# setgid so new files/dirs inherit group=PGID
+chmod g+s "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" 2>/dev/null || true
 
 # Ensure the running script and its directory are traversable by unprivileged user
 chmod a+rx "$SCRIPT_DIR" "$SCRIPT_SELF" || true
