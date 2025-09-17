@@ -100,6 +100,16 @@ while true; do
     sleep "$INPUT_STABLE_SECS"
   fi
 
+    # --- Auto-extract PDF Portfolios (idempotent; once per cycle) ---
+    if [ "${PORTFOLIO_AUTORUN:-true}" = "true" ] && [ -x "/app/scripts/portfolio_unpack.sh" ]; then
+      log INFO "Preprocessing PDF portfolios under ${INPUT_DIR}..."
+      INPUT_DIR="${INPUT_DIR}" \
+      PARENT_DISPOSITION="${PARENT_DISPOSITION:-hide}" \
+      PUID="${PUID:-99}" PGID="${PGID:-100}" UMASK="${UMASK:-0002}" \
+      /app/scripts/portfolio_unpack.sh >> "${LOG_DIR}/docker.log" 2>&1 \
+      || log WARNING "portfolio unpack failed (rc=$?)"
+    fi
+
   shopt -s nullglob
   entries=("$INPUT_DIR"/*)
   shopt -u nullglob
@@ -136,15 +146,21 @@ while true; do
            BIGPDF_SIZE_LIMIT_MB BIGPDF_PAGE_LIMIT
 
 # --- Auto-extract PDF Portfolios (idempotent) ---
-  # Runs only if helper exists; hides parent portfolio (dotfile) so the walker skips it.
-  if [ "${PORTFOLIO_AUTORUN:-true}" = "true" ] && [ -x "/app/scripts/portfolio_unpack.sh" ]; then
+# Runs only if helper exists; moves parent portfolio to WORK_DIR so the walker skips it.
+if [ "${PORTFOLIO_AUTORUN:-true}" = "true" ] && [ -x "/app/scripts/portfolio_unpack.sh" ]; then
+  # Optional announce (quiet by default). Set PORTFOLIO_AUTORUN_ANNOUNCE=true to log this line.
+  if [ "${PORTFOLIO_AUTORUN_ANNOUNCE:-false}" = "true" ]; then
     log INFO "Preprocessing PDF portfolios under ${INPUT_DIR}..."
-    /app/scripts/portfolio_unpack.sh \
-      INPUT_DIR="${INPUT_DIR}" \
-      PARENT_DISPOSITION="${PARENT_DISPOSITION:-hide}" \
-      PUID="${PUID:-99}" PGID="${PGID:-100}" UMASK="${UMASK:-0002}" \
-      >> "${LOG_DIR}/docker.log" 2>&1 || log WARNING "portfolio unpack failed (rc=$?)"
   fi
+
+  INPUT_DIR="${INPUT_DIR}" \
+  PARENT_DISPOSITION="${PARENT_DISPOSITION:-hide}" \
+  PUID="${PUID:-99}" PGID="${PGID:-100}" UMASK="${UMASK:-0002}" \
+  WORK_DIR="${WORK_DIR:-/data/tmp}" \
+  /app/scripts/portfolio_unpack.sh >> "${LOG_DIR}/docker.log" 2>&1 \
+  || log WARNING "portfolio unpack failed (rc=$?)"
+fi
+
 
     log INFO "Process run: $run_name"
     python3 /app/scripts/process_run.py "$run_dir" "$run_out_dir" "$run_log" || true

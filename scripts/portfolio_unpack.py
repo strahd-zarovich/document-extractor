@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, os, re, shlex, subprocess, sys, csv, time
+import argparse, os, re, shlex, subprocess, sys, csv, time, shutil
 from pathlib import Path
 
 def log(msg: str):
@@ -56,6 +56,39 @@ def write_manifest(folder: Path, parent_pdf: Path, children: list[Path]):
             w.writerow([parent_pdf.name, c.name, str(c.relative_to(folder)), size])
     return mf
 
+def hide_or_move_parent_to_workdir(parent_pdf: Path, input_root: Path, work_dir: Path, puid: int, pgid: int) -> bool:
+    """
+    Move the parent portfolio into WORK_DIR/portfolio_hidden/<relpath>/.Parent.pdf
+    Fallback to in-place .rename if moving fails.
+    """
+    try:
+        parent_pdf = parent_pdf.resolve()
+        input_root = input_root.resolve()
+        work_dir = work_dir.resolve()
+
+        # Mirror the run's relative path under WORK_DIR/portfolio_hidden/
+        rel_dir = os.path.relpath(parent_pdf.parent, input_root)
+        hidden_root = work_dir / "portfolio_hidden" / rel_dir
+        hidden_root.mkdir(parents=True, exist_ok=True)
+        ensure_modes(hidden_root, puid, pgid)
+
+        dest_path = hidden_root / f".{parent_pdf.name}"
+        shutil.move(str(parent_pdf), str(dest_path))
+        ensure_modes(dest_path, puid, pgid)
+        log(f"Parent moved to tmp: {dest_path}")
+        return True
+    except Exception as e:
+        # Fallback: old behavior—rename to .Parent.pdf in-place
+        try:
+            hidden_parent = parent_pdf.parent / f".{parent_pdf.name}"
+            shutil.move(str(parent_pdf), str(hidden_parent))
+            ensure_modes(hidden_parent, puid, pgid)
+            log(f"Parent hidden in place: {hidden_parent} (fallback due to: {e})")
+            return True
+        except Exception as e2:
+            log(f"WARNING: could not hide/move parent {parent_pdf.name}: {e2}")
+            return False
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True, help="Root folder to scan (e.g., /data/input)")
@@ -64,6 +97,8 @@ def main():
     ap.add_argument("--puid", type=int, default=99)
     ap.add_argument("--pgid", type=int, default=100)
     ap.add_argument("--umask", default="0002")
+    # NEW: allow passing workdir; default to env WORK_DIR or /data/tmp
+    ap.add_argument("--workdir", default=os.environ.get("WORK_DIR", "/data/tmp"))
     args = ap.parse_args()
 
     os.umask(int(args.umask, 8))
@@ -72,6 +107,7 @@ def main():
         log(f"ERROR: input path does not exist: {root}")
         sys.exit(1)
 
+    work_dir = Path(args.workdir)
     log(f"Scanning for PDF portfolios under: {root}")
 
     # Walk all PDFs (skip hidden dirs)
@@ -118,7 +154,7 @@ def main():
             if child.is_file():
                 ensure_modes(child, args.puid, args.pgid)
                 # Prefix filename with parent for traceability in your CSV
-                # e.g., Parent.pdf::Child.pdf  -> simple and visible in 'filename' column
+                # e.g., Parent.pdf::Child.pdf
                 new_name = f"{pdf.name}::{child.name}"
                 new_path = child.with_name(new_name)
                 try:
@@ -132,15 +168,9 @@ def main():
         mf = write_manifest(out_dir, pdf, children)
         ensure_modes(mf, args.puid, args.pgid)
 
-        # Optionally "hide" the parent so your pipeline ignores it (it skips hidden)
+        # Hide/move the parent so your pipeline ignores it
         if args.parent_disposition == "hide":
-            hidden_parent = pdf.with_name("." + pdf.name)
-            try:
-                pdf.rename(hidden_parent)
-                ensure_modes(hidden_parent, args.puid, args.pgid)
-                log(f"Parent hidden: {hidden_parent.name}")
-            except Exception as e:
-                log(f"WARNING: could not hide parent {pdf.name}: {e}")
+            hide_or_move_parent_to_workdir(pdf, root, work_dir, args.puid, args.pgid)
 
         log(f"PORTFOLIO extracted -> {out_dir} ({len(children)} children)")
 

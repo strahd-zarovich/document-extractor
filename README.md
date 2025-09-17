@@ -105,6 +105,10 @@ The extractor writes **one row per document** unless the PDF is considered “la
 - **Large if:** `size ≥ BIGPDF_SIZE_LIMIT_MB` (default **50**) **OR** `pages ≥ BIGPDF_PAGE_LIMIT` (default **500**)
 - Mode decision is logged for each PDF (`mode=per-doc|per-page`)
 
+- If any page requires OCR, the PDF switches to **per-page rows** (even if small),
+  so you get page-accurate pointers for scanned content.
+
+
 ### Reliability (gating + audit)
 
 Every row includes a **reliability** score in **[0,1]**:
@@ -208,6 +212,27 @@ Place files/folders in `/data/input` and watch `/data/output/<RunName>/run.log`.
   (`(path, page_index, dpi, grayscale)` vs `(path, dpi, page_index, grayscale)`). This is informational and logged once.
 
 ---
+
+### PDF Portfolios (attachments inside PDFs)
+
+- The container auto-scans for PDF portfolios each cycle (idempotent).
+- Attachments are extracted to a sibling folder named `<Parent>__portfolio/`.
+- Each child is renamed in the CSV as: `Parent.pdf::Child.ext` (so you can trace it).
+- After extraction, the **parent portfolio** is moved to:
+  `"$WORK_DIR/portfolio_hidden/<run_subdir>/.Parent.pdf"`
+  so the normal walker doesn’t re-process it.
+- A `portfolio_manifest.csv` is written in the `__portfolio/` folder.
+
+> Note: `.msg` (Outlook message) attachments are currently unsupported. They will not appear in the run CSV.
+
+### Logging & temp cleanup
+
+- To keep logs quiet, set `PORTFOLIO_AUTORUN_ANNOUNCE=false` (default).  
+  Set to `true` to log “Preprocessing PDF portfolios…” each cycle.
+- Temporary hidden parents live under `"$WORK_DIR/portfolio_hidden/..."`.
+  These are safe to delete any time **after** a run finishes. (If enabled,
+  the run code will remove the run’s own stash directory right at “Run end”.)
+
 
 ## Notes
 

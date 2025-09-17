@@ -1,26 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# --- Config (override via env) ---
+# Read env (with safe defaults)
 INPUT_DIR="${INPUT_DIR:-/data/input}"
-PARENT_DISPOSITION="${PARENT_DISPOSITION:-hide}" # hide|leave
+PARENT_DISPOSITION="${PARENT_DISPOSITION:-hide}"
 PUID="${PUID:-99}"
 PGID="${PGID:-100}"
 UMASK="${UMASK:-0002}"
+WORK_DIR="${WORK_DIR:-/data/tmp}"   # NEW: default /data/tmp
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-log() { printf '%s %s\n' "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')]" "$*"; }
-
-if ! command -v pdfdetach >/dev/null 2>&1; then
-  echo "ERROR: pdfdetach not found (install poppler-utils)" >&2
-  exit 1
-fi
-
-log "Portfolio unpacker: INPUT_DIR=$INPUT_DIR PARENT_DISPOSITION=$PARENT_DISPOSITION PUID=$PUID PGID=$PGID"
-
-# Run the Python worker
-exec python3 "$SCRIPT_DIR/portfolio_unpack.py" \
+# Delegate to Python worker
+exec /usr/bin/env python3 /app/scripts/portfolio_unpack.py \
   --input "$INPUT_DIR" \
   --parent-disposition "$PARENT_DISPOSITION" \
-  --puid "$PUID" --pgid "$PGID" --umask "$UMASK"
+  --puid "$PUID" \
+  --pgid "$PGID" \
+  --umask "$UMASK" \
+  --workdir "$WORK_DIR"

@@ -232,6 +232,26 @@ def main():
                     logger.debug(f"Input cleanup: could not remove {run_dir_p}: {e}")
     except Exception as e:
         logger.debug(f"Input cleanup failed: {e}")
+    
+# --- Clean the portfolio stash for THIS run (if any) ---
+try:
+    import os, shutil
+    from pathlib import Path
+
+    work_dir = Path(os.environ.get("WORK_DIR", "/data/tmp")).resolve()
+    input_dir = Path(os.environ.get("INPUT_DIR", "/data/input")).resolve()
+    run_dir = Path(run_path).resolve()  # run_path should already be set to the current run folder
+
+    # Map run_dir back to its relative path under INPUT_DIR
+    rel = run_dir.relative_to(input_dir)
+    stash_dir = work_dir / "portfolio_hidden" / rel
+
+    if stash_dir.exists():
+        shutil.rmtree(stash_dir, ignore_errors=True)
+        log.info(f"Cleaned portfolio stash: {stash_dir}")
+except Exception as e:
+    log.warning(f"Stash cleanup skipped: {e}")
+
 
     # Always log end-of-run and exit 0 (don’t fail the whole run)
     logger.info(f"Run end: {run_name}")
