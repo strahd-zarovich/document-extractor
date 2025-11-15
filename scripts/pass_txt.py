@@ -16,6 +16,7 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 import common
+import output_writer
 
 def main():
     if len(sys.argv) < 4:
@@ -24,7 +25,6 @@ def main():
 
     txt_path, csv_path, run_log_path = sys.argv[1], sys.argv[2], sys.argv[3]
     logger = common.get_logger(run_log_path)
-    writer = common.CsvWriter(csv_path)
 
     try:
         with open(txt_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -34,8 +34,28 @@ def main():
         sys.exit(1)
 
     rel = common.score_reliability(text)
-    writer.write_row(os.path.basename(txt_path), "-", text, "txt", "false", f"{rel:.2f}")
-    logger.info(f"TXT file accepted: {os.path.basename(txt_path)} reliability={rel:.2f}")
+
+    # Build pages list — treat the whole TXT as a single "page 1"
+    pages = [(1, text)] if text.strip() else []
+    status = "OK" if pages else "ERROR"
+
+    # Use centralized writer to create .txt (if any) and append CSV row
+    output_writer.write_result(
+        csv_path=csv_path,
+        original_file=os.path.abspath(txt_path),
+        pages=pages,
+        pass_used="txt",
+        score=rel,
+        status=status,
+        used_ocr=False,
+        logger=logger,
+    )
+
+    if status == "OK":
+        logger.info(f"TXT file accepted: {os.path.basename(txt_path)} reliability={rel:.2f}")
+    else:
+        logger.warning(f"TXT file had no usable text: {os.path.basename(txt_path)}")
+
     sys.exit(0)
 
 if __name__ == "__main__":

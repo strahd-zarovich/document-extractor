@@ -17,6 +17,7 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 import common
+import output_writer
 from PIL import Image, UnidentifiedImageError
 
 def _ocr_frame(img) -> tuple[str, float]:
@@ -31,7 +32,6 @@ def main():
 
     img_path, csv_path, run_log_path = sys.argv[1], sys.argv[2], sys.argv[3]
     logger = common.get_logger(run_log_path)
-    writer = common.CsvWriter(csv_path)
     basename = os.path.basename(img_path)
 
     try:
@@ -44,7 +44,10 @@ def main():
         sys.exit(1)
 
     frames = getattr(im, "n_frames", 1)
-    rows_written = 0
+    pages = []
+    best_rel = 0.0
+    has_text = False
+
     try:
         for idx in range(frames):
             try:
@@ -57,13 +60,43 @@ def main():
                 logger.warning(f"IMG OCR error @{idx+1}: {e}")
                 text, rel = "", 0.0
 
-            # Always 6 columns; per-frame rows for multi-frame inputs
-            page_display = str(idx + 1) if frames > 1 else "-"
-            writer.write_row(basename, page_display, text, "img_ocr", "true", f"{rel:.2f}")
-            rows_written += 1
+            # Track per-frame text and reliability
+            pages.append((idx + 1, text))
+            if text.strip():
+                has_text = True
+            if rel > best_rel:
+                best_rel = rel
 
-        logger.info(f"IMG file accepted: {basename} frames={frames} rows={rows_written}")
-        sys.exit(0)
+        # Decide status based on whether any usable text was found
+        if has_text:
+            status = "OK"
+            # We keep all frames as pages; some may have blank text, which is fine.
+            output_writer.write_result(
+                csv_path=csv_path,
+                original_file=os.path.abspath(img_path),
+                pages=pages,
+                pass_used="img_ocr",
+                score=best_rel,
+                status=status,
+                used_ocr=True,
+                logger=logger,
+            )
+            logger.info(f"IMG file accepted: {basename} frames={frames} pages={len(pages)} best_rel={best_rel:.2f}")
+            sys.exit(0)
+        else:
+            # No usable text: append CSV row only, but do NOT write any .txt file
+            output_writer.write_result(
+                csv_path=csv_path,
+                original_file=os.path.abspath(img_path),
+                pages=[],  # empty => output_writer will skip creating a text file
+                pass_used="img_ocr",
+                score=best_rel,
+                status="ERROR",
+                used_ocr=True,
+                logger=logger,
+            )
+            logger.warning(f"IMG had no usable text: {basename} frames={frames}")
+            sys.exit(1)
     finally:
         try:
             im.close()

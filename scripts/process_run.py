@@ -3,7 +3,7 @@
 """
 Run orchestrator:
  - Recursively walk a run directory
- - Ensure a single 6-column CSV for the run
+ - Ensure a single CSV index for the run
  - Route each file to its pass
  - On success: write CSV and DELETE source
  - On failure/unsupported: move to Mandatory Review and record reason
@@ -18,7 +18,20 @@ if SCRIPT_DIR not in sys.path:
 
 import common
 
-CSV_HEADER = ["filename", "page", "text", "method", "used_ocr", "reliability"]
+CSV_HEADER = [
+    "original_file",
+    "original_name",
+    "relative_path",
+    "txt_relative_path",
+    "pages",
+    "processed_at",
+    "pass_used",
+    "score",
+    "status",
+    "used_ocr",
+    "run_id",
+    "notes",
+]
 SUPPORTED_EXTS = {".pdf", ".docx", ".doc", ".txt", ".tif", ".tiff", ".png", ".jpg", ".jpeg"}
 UNSUPPORTED_EXTS = {".xlsx"}  # explicit quarantine
 NOISE_DELETE_EXTS = {".wav"}  # auto-delete on sight
@@ -233,29 +246,62 @@ def main():
     except Exception as e:
         logger.debug(f"Input cleanup failed: {e}")
     
-# --- Clean the portfolio stash for THIS run (if any) ---
-try:
-    import os, shutil
-    from pathlib import Path
+    # --- Remove empty run folder (avoid leaving ghost dirs that trigger re-scans) ---
+    try:
+        run_dir_p = Path(run_dir).resolve()
+        input_root = Path(os.getenv("INPUT_DIR", "/data/input")).resolve()
 
-    work_dir = Path(os.environ.get("WORK_DIR", "/data/tmp")).resolve()
-    input_dir = Path(os.environ.get("INPUT_DIR", "/data/input")).resolve()
-    run_dir = Path(run_path).resolve()  # run_path should already be set to the current run folder
+        # Best-effort: remove common junk files that would keep the dir non-empty
+        for junk in (".DS_Store", "Thumbs.db"):
+            try:
+                (run_dir_p / junk).unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
 
-    # Map run_dir back to its relative path under INPUT_DIR
-    rel = run_dir.relative_to(input_dir)
-    stash_dir = work_dir / "portfolio_hidden" / rel
+        # Only remove if:
+        #  - it's NOT the input root itself
+        #  - its parent IS the input root
+        #  - it is empty
+        if run_dir_p != input_root and run_dir_p.parent == input_root:
+            try:
+                next(run_dir_p.iterdir())
+                is_empty = False
+            except (StopIteration, FileNotFoundError):
+                is_empty = True
+            if is_empty:
+                logger.info(f"Input cleanup: removing empty run folder: {run_dir_p.name}")
+                try:
+                    run_dir_p.rmdir()
+                except Exception as e:
+                    logger.debug(f"Input cleanup: could not remove {run_dir_p}: {e}")
+    except Exception as e:
+        logger.debug(f"Input cleanup failed: {e}")
 
-    if stash_dir.exists():
-        shutil.rmtree(stash_dir, ignore_errors=True)
-        log.info(f"Cleaned portfolio stash: {stash_dir}")
-except Exception as e:
-    log.warning(f"Stash cleanup skipped: {e}")
+    # --- Clean the portfolio stash for THIS run (if any) ---
+    try:
+        import shutil
+        work_dir = Path(os.environ.get("WORK_DIR", "/data/tmp")).resolve()
+        input_dir = Path(os.environ.get("INPUT_DIR", "/data/input")).resolve()
+        run_abs = Path(run_dir).resolve()
 
+        # Compute stash dir relative to INPUT_DIR (guard against ValueError)
+        try:
+            rel = run_abs.relative_to(input_dir)
+        except Exception:
+            rel = run_abs.name  # fallback: just use the folder name
 
-    # Always log end-of-run and exit 0 (don’t fail the whole run)
+        stash_dir = work_dir / "portfolio_hidden" / rel
+        if stash_dir.exists():
+            shutil.rmtree(stash_dir, ignore_errors=True)
+            logger.info(f"Cleaned portfolio stash: {stash_dir}")
+    except Exception as e:
+        logger.warning(f"Stash cleanup skipped: {e}")
+
     logger.info(f"Run end: {run_name}")
-    sys.exit(0)
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

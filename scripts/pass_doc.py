@@ -25,6 +25,7 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 import common  # shared logger, CsvWriter, score_reliability
+import output_writer
 
 def _env_float(name: str, default: float) -> float:
     try:
@@ -93,36 +94,72 @@ def main():
     ext = os.path.splitext(in_path)[1].lower()
 
     logger = common.get_logger(run_log_path)
-    writer = common.CsvWriter(csv_path)
 
-    cutoff = _env_float("PASS_DOC_CUTOFF", 0.75)
+    # Separate, tunable cutoffs for DOC and DOCX
+    base_cutoff = _env_float("PASS_DOC_CUTOFF", 0.75)
+    docx_cutoff = _env_float("PASS_DOCX_CUTOFF", 0.70)  # slightly more lenient by default
 
     # Extract
     try:
         if ext == ".docx":
             method = "docx_text"
             text = _docx_text(in_path)
+            cutoff = docx_cutoff
         elif ext == ".doc":
             method = "doc_text"
             text = _doc_text(in_path)
+            cutoff = base_cutoff
         else:
             logger.error(f"pass_doc called with unsupported extension: {ext}")
             sys.exit(2)
     except Exception as e:
         logger.error(f"DOC open/extract failed: {basename} :: {e}")
+        # Record failure in CSV (no txt file)
+        output_writer.write_result(
+            csv_path=csv_path,
+            original_file=os.path.abspath(in_path),
+            pages=[],
+            pass_used="doc_extract_error",
+            score=0.0,
+            status="ERROR",
+            used_ocr=False,
+            logger=logger,
+        )
         sys.exit(1)
 
-    # Reliability (per-document)
-    rel = common.score_reliability(text or "")
+    text = text or ""
+    rel = common.score_reliability(text)
     logger.info(f"DOC summary: {basename} method={method} reliability={rel:.2f} cutoff={cutoff}")
 
-    # Gate & write
-    if rel >= cutoff and (text or "").strip():
-        writer.write_row(basename, "-", text, method, "false", f"{rel:.2f}")
+    # Gate: require some non-whitespace text and reliability above cutoff
+    if text.strip() and rel >= cutoff:
+        pages = [(1, text)]
         logger.info(f"DOC accept: {basename} reliability={rel:.2f}")
+
+        output_writer.write_result(
+            csv_path=csv_path,
+            original_file=os.path.abspath(in_path),
+            pages=pages,
+            pass_used=method,
+            score=rel,
+            status="OK",
+            used_ocr=False,
+            logger=logger,
+        )
         sys.exit(0)
 
-    logger.warning(f"DOC below cutoff: {basename} reliability={rel:.2f} < {cutoff}")
+    # Below cutoff or effectively empty: mark as ERROR, no txt file
+    logger.warning(f"DOC below cutoff or empty: {basename} reliability={rel:.2f} < {cutoff}")
+    output_writer.write_result(
+        csv_path=csv_path,
+        original_file=os.path.abspath(in_path),
+        pages=[],  # no usable text => no .txt
+        pass_used=method,
+        score=rel,
+        status="ERROR",
+        used_ocr=False,
+        logger=logger,
+    )
     sys.exit(1)
 
 if __name__ == "__main__":
