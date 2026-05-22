@@ -26,6 +26,7 @@ INPUT_DIR="${INPUT_DIR:-/data/input}"
 OUTPUT_DIR="${OUTPUT_DIR:-/data/output}"
 WORK_DIR="${WORK_DIR:-/data/tmp}"
 LOG_DIR="${LOG_DIR:-/data/logs}"
+CONFIG_DIR="${CONFIG_DIR:-/data/config}"
 
 INPUT_STABLE_SECS="${INPUT_STABLE_SECS:-15}"
 INPUT_CHECK_INTERVAL="${INPUT_CHECK_INTERVAL:-15}"
@@ -42,18 +43,31 @@ BIGPDF_SIZE_LIMIT_MB="${BIGPDF_SIZE_LIMIT_MB:-50}"
 BIGPDF_PAGE_LIMIT="${BIGPDF_PAGE_LIMIT:-500}"
 
 # ---------- Prepare directories & perms ----------
-mkdir -p "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR"
+
+mkdir -p "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" "$CONFIG_DIR"
 umask "$UMASK"
-chgrp -R "${PGID}" "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" || true
-chmod -R g+rwX       "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" || true
-# setgid so new files/dirs inherit group=PGID
-chmod g+s "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" 2>/dev/null || true
+chgrp -R "${PGID}" "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" "$CONFIG_DIR" || true
+chmod -R g+rwX       "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" "$CONFIG_DIR" || true
+chmod g+s "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" "$CONFIG_DIR" 2>/dev/null || true
 
 # Ensure the running script and its directory are traversable by unprivileged user
 chmod a+rx "$SCRIPT_DIR" "$SCRIPT_SELF" || true
 # Best-effort: if these exist, make them traversable too (harmless if absent)
 [[ -d /app ]] && chmod a+rx /app || true
 [[ -d /app/scripts ]] && chmod a+rx /app/scripts || true
+
+# Ensure config directory exists
+mkdir -p "$CONFIG_DIR"
+
+# Seed default config files if missing
+for file in /app/defaults/*; do
+    filename=$(basename "$file")
+
+    if [ ! -f "$CONFIG_DIR/$filename" ]; then
+        cp "$file" "$CONFIG_DIR/$filename"
+        echo "[INFO] Seeded default config: $filename"
+    fi
+done
 
 # ---------- Drop privileges once (if running as root and gosu available) ----------
 if [[ -z "${RUN_AS_HELPER:-}" && "$(id -u)" == "0" ]]; then
@@ -131,7 +145,7 @@ while true; do
     run_log="$run_out_dir/run.log"
     mkdir -p "$run_out_dir"
 
-    export INPUT_DIR OUTPUT_DIR WORK_DIR LOG_DIR \
+    export INPUT_DIR OUTPUT_DIR WORK_DIR LOG_DIR CONFIG_DIR \
            PASS_TXT_CUTOFF PASS_DOC_CUTOFF PASS_OCR_A_CUTOFF PASS_OCR_B_CUTOFF \
            BIGPDF_SIZE_LIMIT_MB BIGPDF_PAGE_LIMIT
 

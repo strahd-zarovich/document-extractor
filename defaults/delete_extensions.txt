@@ -1,0 +1,6 @@
+.msg
+.wav
+.tmp
+.lnk
+.ds_store
+.thumbs.db

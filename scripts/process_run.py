@@ -32,9 +32,32 @@ CSV_HEADER = [
     "run_id",
     "notes",
 ]
-SUPPORTED_EXTS = {".pdf", ".docx", ".doc", ".txt", ".tif", ".tiff", ".png", ".jpg", ".jpeg"}
-UNSUPPORTED_EXTS = {".xlsx"}  # explicit quarantine
-NOISE_DELETE_EXTS = {".wav"}  # auto-delete on sight
+CONFIG_DIR = Path(os.getenv("CONFIG_DIR", "/data/config"))
+
+def _load_list_file(filename: str, defaults: set[str]) -> set[str]:
+    path = CONFIG_DIR / filename
+    if not path.exists():
+        return defaults
+
+    values = set()
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip().lower()
+                if not line or line.startswith("#"):
+                    continue
+                if not line.startswith(".") and "*" not in line:
+                    line = "." + line
+                values.add(line)
+    except Exception:
+        return defaults
+
+    return values
+
+SUPPORTED_EXTS = {".pdf", ".docx", ".txt", ".tif", ".tiff", ".png", ".jpg", ".jpeg"}
+NOISE_DELETE_EXTS = _load_list_file("delete_extensions.txt", {".wav"})
+IGNORE_FILES = _load_list_file("ignore_files.txt", {"portfolio_manifest.csv"})
+MANUAL_REVIEW_EXTS = _load_list_file("manual_review_extensions.txt", {".doc", ".xlsx"})
 
 def _ensure_dirs(run_dir: Path, out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -91,21 +114,30 @@ def _call_script(script: str, args: List[str]) -> int:
     return proc.returncode
 
 def _route_ext(path: Path) -> str:
+    fname = path.name.lower()
     ext = path.suffix.lower()
+
+    if fname in IGNORE_FILES:
+        return "ignore"
+
     if ext in NOISE_DELETE_EXTS:
         return "noise_delete"
-    if ext not in SUPPORTED_EXTS and ext not in UNSUPPORTED_EXTS:
+
+    if ext in MANUAL_REVIEW_EXTS:
+        return "manual_review"
+
+    if ext not in SUPPORTED_EXTS:
         return "unsupported"
-    if ext in UNSUPPORTED_EXTS:
-        return "unsupported"
+
     if ext == ".pdf":
         return "pdf"
-    if ext in (".docx", ".doc"):
+    if ext == ".docx":
         return "doc"
     if ext == ".txt":
         return "txt"
     if ext in (".tif", ".tiff", ".png", ".jpg", ".jpeg"):
         return "img"
+
     return "unsupported"
 
 def _is_single_file_run(run_dir: Path) -> Optional[str]:
@@ -161,6 +193,16 @@ def main():
                     _delete_path(fpath)
                 except Exception:
                     logger.warning(f"Failed to delete noise file: {relpath}")
+                continue
+
+            if kind == "ignore":
+                logger.info(f"Ignored file: {relpath}")
+                continue
+
+            if kind == "manual_review":
+                logger.warning(f"Manual Review file type: {relpath}")
+                _append_review_manifest(output_dir, relpath, "manual_review_ext")
+                common.move_to_manual(str(fpath), str(output_dir), "manual_review_ext")
                 continue
 
             if kind == "unsupported":

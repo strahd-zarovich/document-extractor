@@ -44,6 +44,7 @@ COPY entrypoint.sh /app/
 # Ship a default config INSIDE the image; runtime config will live in /data/config
 COPY config.conf /app/defaults/config.conf
 COPY scripts/ /app/scripts/
+COPY defaults/ /app/defaults/
 
 # After copying your app into /app
 RUN chmod -R a+rX /app
