@@ -1,242 +1,512 @@
+````markdown
+# Document Extractor Docker (0.1.8)
 
-# What I verified (✅) and what still needs attention (⚠️)
+A Docker-based document extraction pipeline designed for large mixed-document collections.
 
-## ✅ Core pipeline & gating
+The container recursively processes PDFs, Office documents, text files, and images using a staged extraction pipeline:
 
-* **PDF order:** `TXT → OCR-A → OCR-B` enforced in `scripts/pass_pdf.py` with a single “begin” log per pass.
-* **Per-doc vs per-page:** Switches by `size ≥ 50 MB OR pages ≥ 500`, logged and applied across TXT/OCR passes.
-* **Reliability everywhere:**
+1. Native text extraction
+2. OCR-A (balanced OCR)
+3. OCR-B (aggressive OCR fallback)
+4. Mandatory Review quarantine when confidence is too low
 
-  * **Per-doc** rows: document-level median reliability.
-  * **Per-page** rows: page-level reliability.
-  * Values are written for **TXT**, **OCR-A**, **OCR-B**, **DOC/DOCX**, and **IMG**.
-* **CSV invariants:** Always 6 columns: `filename,page,text,method,used_ocr,reliability`.
-* **TXT files:** Routed to `scripts/pass_txt.py`, single row with reliability.
-* **Images:** `scripts/pass_img.py` handles PNG/JPG/TIFF (multi-frame ok) with reliability, 6 columns.
-* **DOC/DOCX:** `scripts/pass_doc.py` extracts native text, computes reliability, accepts if `PASS_DOC_CUTOFF` (default 0.75).
-* **Low-disk guardrail:** `WORK_DIR` free < 1 GB → early fail before OCR, put file in Manual Review; logged as `LOW_DISK`.
-* **Delete on success:** `process_run.py` deletes the input source only when the pass returns `rc=0`. Quarantine flows to `Mandatory Review/` with `review_manifest.csv`.
-
-## ✅ Ops/structure
-
-* **Entrypoint logging:** Unified helper; cutoffs echoed (TXT/DOC/OCR-A/OCR-B), thresholds logged; child envs exported (including `PASS_DOC_CUTOFF`).
-* **Paths:** Default `WORK_DIR=/data/tmp` (bind-mounted via `/data`).
-* **Healthcheck:** Present and simple.
-* **Common utilities:** `common.py` exposes all helpers used by new passes (reliability scorer, PDF helpers, OCR wrapper, CsvWriter, etc.).
-
-## ⚠️ Minor follow-ups
-
-1. **.wav auto-delete (policy):**
-   In earlier specs you wanted `.wav` deleted immediately (not quarantined). Current `process_run.py` treats unknown types as “unsupported” → Manual Review.
-   **Fix (tiny):** Handle `ext == ".wav"` by logging and deleting (no MR entry).
-
-2. **Legacy shell pass scripts present:**
-   `scripts/pass_txt.sh`, `pass_pdf.sh`, etc. remain. They’re harmless (unused), but consider deleting to avoid confusion.
-
-3. **README/TODO content:**
-   The current files are partial placeholders. I’ve written complete replacements below to match the new behavior.
-
-If you want, I can paste a 6-line diff to implement the `.wav` auto-delete, but I’ll stick to your ask (review + docs) for now.
+The goal is:
+- maximize automated extraction,
+- preserve forensic traceability,
+- minimize silent failures,
+- and make debugging easy when extraction fails.
 
 ---
 
-# Updated `README.md` (complete)
+# Major Features
 
-```markdown
-# Text Extractor Docker
+## Multi-Pass PDF Processing
+PDFs are processed in stages:
 
-Watches an input folder and extracts as much text as possible from PDFs, Office docs, text files, and images—trying native text first, then OCR with two increasingly robust passes. Results are normalized into a single CSV per run. Items that can’t be confidently processed are sent to **Mandatory Review**.
+1. TXT extraction
+2. OCR-A fallback
+3. OCR-B fallback
+4. Mandatory Review
 
-- **OCR language:** English only (`eng`)
-- **No Web UI:** folders + logs
-- **Delete-on-success:** inputs are removed after successful CSV write
-- **Single 6-column CSV schema:** `filename,page,text,method,used_ocr,reliability`
+Each stage uses reliability scoring before acceptance.
 
 ---
 
-## How it works
+## Reliability Scoring
+Every extraction path generates a reliability score:
 
-### Folder layout (single `/data` mount)
+- TXT
+- OCR-A
+- OCR-B
+- DOC/DOCX
+- Images
 
+Reliability values are written into the CSV output.
+
+---
+
+## One TXT Per Source Document
+Each processed document produces:
+
+```text
+document.txt
+````
+
+with:
+
+* metadata header,
+* page separators,
+* normalized UTF-8 output.
+
+---
+
+## Embedded Portfolio Extraction
+
+PDF portfolios and embedded attachments are automatically extracted.
+
+Embedded children preserve parent lineage:
+
+```text
+Parent.pdf__Child.xlsx
 ```
 
-/data/
-input/                 # drop files or folders here (each folder = one "run")
-output/ <RunName>/ <RunName>.csv      # or <SingleFileName>.csv for single-file runs
-run.log
+This allows tracing:
+
+* embedded Office files,
+* embedded PDFs,
+* nested attachment chains.
+
+Parent portfolio PDFs are moved into:
+
+```text
+$WORK_DIR/portfolio_hidden/<run>/
+```
+
+to prevent recursive reprocessing.
+
+---
+
+## Mandatory Review System
+
+Files that cannot be safely processed are moved into:
+
+```text
 Mandatory Review/
-\<original files…>
-review\_manifest.csv
-logs/
-docker.log
-
 ```
 
-### Runs & quiescence
+with:
 
-- The container waits for `/data/input` to be idle (default **15s**) before scanning.
-- **If you drop a file** directly in `/data/input`, it’s wrapped into a run named after the file stem.
-- **If you drop a folder**, its name is the run name; contents are processed recursively.
+* readable logical filenames,
+* preserved embedded lineage,
+* review_manifest.csv,
+* detailed logging.
 
-### Pass order (PDF)
+Random temp names like:
 
-1. **TXT (native text)** → accept if `reliability ≥ PASS_TXT_CUTOFF`
-2. **OCR-A (balanced)** → accept if `reliability ≥ PASS_OCR_A_CUTOFF`
-3. **OCR-B (robust)** → accept if `reliability ≥ PASS_OCR_B_CUTOFF`
-4. Otherwise → **Mandatory Review**
-
-Only one “begin” log per pass is emitted (from the orchestrator).
-
-### CSV schema (always 6 columns)
-
-`filename,page,text,method,used_ocr,reliability`
-
-- **filename** — basename (relative to run)
-- **page** — `-` for whole-document rows; page number for per-page rows
-- **text** — extracted text (UTF-8)
-- **method** — `pdf_text`, `pdf_ocr_a`, `pdf_ocr_b`, `docx_text`, `doc_text`, `txt`, `img_ocr`
-- **used_ocr** — `"true"` / `"false"` (string)
-- **reliability** — `0.00–1.00` (stringified float)
-
-### Per-doc vs per-page mode
-
-The extractor writes **one row per document** unless the PDF is considered “large,” in which case it writes **one row per page**:
-
-- **Large if:** `size ≥ BIGPDF_SIZE_LIMIT_MB` (default **50**) **OR** `pages ≥ BIGPDF_PAGE_LIMIT` (default **500**)
-- Mode decision is logged for each PDF (`mode=per-doc|per-page`)
-
-- If any page requires OCR, the PDF switches to **per-page rows** (even if small),
-  so you get page-accurate pointers for scanned content.
-
-
-### Reliability (gating + audit)
-
-Every row includes a **reliability** score in **[0,1]**:
-- Per-doc rows use the **median of per-page reliabilities**
-- Per-page rows carry the **page’s reliability**
-
-Cutoffs (env-tunable):
-- `PASS_TXT_CUTOFF` (default **0.75**)
-- `PASS_OCR_A_CUTOFF` (default **0.65**)
-- `PASS_OCR_B_CUTOFF` (default **0.55**)
-- `PASS_DOC_CUTOFF` (default **0.75**)
-
-### Other file types
-
-- **DOCX / DOC:** native text extraction (python-docx / antiword→catdoc). Per-doc reliability gate.
-- **TXT:** single row, per-doc reliability.
-- **Images (PNG/JPG/TIFF):** OCR; per-image row (multi-frame TIFF → one row per frame).
-- **Audio (`.wav`):** treated as noise — **auto-deleted** on sight (not added to CSV; not quarantined).
-
-### Mandatory Review
-
-On failure or unsupported types, originals are moved to:
+```text
+C3XWAM~P
 ```
 
-/data/output/<RunName>/Mandatory Review/
-
-```
-with `review_manifest.csv` (`filename, reason`).
-
-### Low-space guardrail
-
-Before OCR, if free space in `WORK_DIR` is **< 1 GB**, the file is failed early with reason `low_workdir_space` and sent to Manual Review. The run continues.
+are no longer used in 0.1.8.
 
 ---
 
-## Configuration
+## Configurable Extension Rules
 
-Environment variables (with defaults):
+Behavior is controlled through editable config files:
 
+```text
+/data/config/
 ```
 
-INPUT\_DIR=/data/input
-OUTPUT\_DIR=/data/output
-WORK\_DIR=/data/tmp
-LOG\_DIR=/data/logs
-INPUT\_STABLE\_SECS=15
-INPUT\_CHECK\_INTERVAL=15
+Including:
+
+* delete_extensions.txt
+* ignore_files.txt
+* manual_review_extensions.txt
+
+---
+
+# Config File Behavior
+
+The container only seeds default config files on first startup.
+
+If a config file already exists inside:
+
+```text
+/data/config/
+```
+
+it will NOT be overwritten during:
+
+* container rebuilds,
+* image updates,
+* version upgrades.
+
+This is intentional so user-customized rules survive upgrades.
+
+To receive newer default rules:
+
+1. Manually update the existing config file, OR
+2. Delete the config file and restart the container to reseed it from:
+
+```text
+/app/defaults/
+```
+
+---
+
+# Current File Policies (0.1.8)
+
+## Auto-Delete Extensions
+
+These are treated as noise files and deleted automatically:
+
+```text
+.wav
+.msg
+.pptx
+.ptx
+```
+
+---
+
+## Manual Review Extensions
+
+These currently route directly to Mandatory Review:
+
+```text
+.doc
+.xlsx
+```
+
+Reason:
+
+* old DOC conversion is unreliable,
+* XLSX extraction policy is still under evaluation.
+
+---
+
+## Ignored Internal Files
+
+```text
+portfolio_manifest.csv
+review_manifest.csv
+.processed.list
+```
+
+These are ignored globally to prevent recursive processing loops.
+
+---
+
+# Folder Layout
+
+```text
+/data/
+├── input/
+├── output/
+├── logs/
+├── tmp/
+└── config/
+```
+
+---
+
+# Input Behavior
+
+## Single File
+
+If a single file is dropped into:
+
+```text
+/data/input/
+```
+
+the container automatically creates a run folder.
+
+Example:
+
+```text
+/data/input/test.pdf
+```
+
+becomes:
+
+```text
+Run Name:
+test
+```
+
+---
+
+## Folder Input
+
+Folders dropped into `/data/input` are processed recursively.
+
+Each folder becomes a single run.
+
+---
+
+# Output Structure
+
+Example:
+
+```text
+/output/MyRun/
+├── MyRun.csv
+├── run.log
+├── Mandatory Review/
+└── extracted txt files
+```
+
+---
+
+# CSV Format
+
+The CSV schema is always:
+
+```text
+filename,page,text,method,used_ocr,reliability
+```
+
+---
+
+# OCR Modes
+
+## OCR-A
+
+Balanced OCR mode:
+
+* faster,
+* lower resource usage,
+* preferred first OCR fallback.
+
+---
+
+## OCR-B
+
+Aggressive OCR mode:
+
+* slower,
+* more tolerant of poor scans,
+* final OCR fallback before Mandatory Review.
+
+---
+
+# Large PDF Handling
+
+Large PDFs automatically switch to per-page processing.
+
+Thresholds:
+
+```text
+BIGPDF_SIZE_LIMIT_MB=50
+BIGPDF_PAGE_LIMIT=500
+```
+
+---
+
+# DEBUG_TEMP_MODE
+
+Set:
+
+```text
+DEBUG_TEMP_MODE=true
+```
+
+to preserve temporary processing files after a run.
+
+Useful for:
+
+* OCR debugging,
+* portfolio extraction debugging,
+* temp-file troubleshooting.
+
+Default:
+
+```text
+false
+```
+
+---
+
+# Runtime Cleanup
+
+The container automatically:
+
+* removes completed portfolio stash folders,
+* removes stale temporary extraction folders,
+* cleans empty run folders,
+* deletes successful inputs.
+
+Cleanup behavior respects:
+
+```text
+DEBUG_TEMP_MODE
+```
+
+---
+
+# Logging
+
+Main logs:
+
+```text
+/output/<run>/run.log
+/data/logs/docker.log
+```
+
+Additional logging includes:
+
+* OCR stage transitions,
+* portfolio extraction mapping,
+* Manual Review moves,
+* cleanup operations,
+* reliability decisions.
+
+---
+
+# Environment Variables
+
+## Core Paths
+
+```text
+INPUT_DIR=/data/input
+OUTPUT_DIR=/data/output
+WORK_DIR=/data/tmp
+LOG_DIR=/data/logs
+CONFIG_DIR=/data/config
+```
+
+---
+
+## Processing Thresholds
+
+```text
+PASS_TXT_CUTOFF=0.75
+PASS_DOC_CUTOFF=0.75
+PASS_OCR_A_CUTOFF=0.65
+PASS_OCR_B_CUTOFF=0.55
+```
+
+---
+
+## Runtime Controls
+
+```text
+DEBUG_TEMP_MODE=false
+INPUT_STABLE_SECS=15
+INPUT_CHECK_INTERVAL=15
+```
+
+---
+
+## Permissions
+
+```text
 PUID=99
 PGID=100
 UMASK=0002
+```
 
-PASS\_TXT\_CUTOFF=0.80
-PASS\_DOC\_CUTOFF=0.75
-PASS\_OCR\_A\_CUTOFF=0.70
-PASS\_OCR\_B\_CUTOFF=0.60
-BIGPDF\_SIZE\_LIMIT\_MB=50
-BIGPDF\_PAGE\_LIMIT=500
+Designed for:
 
-````
-
-At startup, the container logs effective values and library versions (best-effort).
+* UnRAID
+* Docker bind mounts
+* SMB shares
 
 ---
 
-## Quick start (compose)
+# Docker Example
 
 ```yaml
-version: "3.8"
 services:
-  text-extractor:
-    image: text-extractor:latest
-    container_name: text-extractor
-    user: "99:100"
-    restart: unless-stopped
-    volumes:
-      - /path/on/host/data:/data
+  document-extractor:
+    image: strahdzarovich/document-extractor:0.1.8
+    container_name: document-extractor
+
     environment:
-      - TZ=America/New_York
       - PUID=99
       - PGID=100
-    healthcheck:
-      test: ["CMD-SHELL", "/app/scripts/healthcheck.sh"]
-      interval: 2m
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-````
+      - TZ=America/New_York
 
-Place files/folders in `/data/input` and watch `/data/output/<RunName>/run.log`.
+    volumes:
+      - /mnt/user/document-extractor:/data
+      - /mnt/user/document-extractor/tmp:/data/tmp
 
----
-
-## Troubleshooting
-
-* **Only OCR runs, TXT never triggers:** Check `run.log` for `TXT begin`. If absent, ensure `pass_pdf_txt.py` is present and no pre-check is short-circuiting.
-* **Reliability shows 0.00:** Ensure you’re looking at updated CSV rows; all paths now populate reliability.
-* **Large PDFs slow:** Expect per-page mode; verify free space in `/data/tmp`.
-* **Unsupported types:** See `review_manifest.csv` for reasons. (Optional policy: auto-delete certain noise types—see TODO.)
-* **Permissions:** PUID/PGID control ownership on bind-mounted `/data`.
-* **Render signature detection:** The first OCR invocation logs which `render_page_image(...)` signature is in use
-  (`(path, page_index, dpi, grayscale)` vs `(path, dpi, page_index, grayscale)`). This is informational and logged once.
+    restart: unless-stopped
+```
 
 ---
 
-### PDF Portfolios (attachments inside PDFs)
+`/data/tmp` is shown as a separate bind mount on purpose. This makes it easy to move temporary OCR/portfolio/Office work to faster or disposable storage without moving the full `/data` folder.
 
-- The container auto-scans for PDF portfolios each cycle (idempotent).
-- Attachments are extracted to a sibling folder named `<Parent>__portfolio/`.
-- Each child is renamed in the CSV as: `Parent.pdf::Child.ext` (so you can trace it).
-- After extraction, the **parent portfolio** is moved to:
-  `"$WORK_DIR/portfolio_hidden/<run_subdir>/.Parent.pdf"`
-  so the normal walker doesn’t re-process it.
-- A `portfolio_manifest.csv` is written in the `__portfolio/` folder.
+---
 
-> Note: `.msg` (Outlook message) attachments are currently unsupported. They will not appear in the run CSV.
+# Current Limitations
 
-### Logging & temp cleanup
+## Long Embedded Filenames
 
-- To keep logs quiet, set `PORTFOLIO_AUTORUN_ANNOUNCE=false` (default).  
-  Set to `true` to log “Preprocessing PDF portfolios…” each cycle.
-- Temporary hidden parents live under `"$WORK_DIR/portfolio_hidden/..."`.
-  These are safe to delete any time **after** a run finishes. (If enabled,
-  the run code will remove the run’s own stash directory right at “Run end”.)
+Deeply nested embedded attachments can create very long filenames:
 
+```text
+Parent.pdf__Embedded.pdf__Child.xlsx
+```
 
-## Notes
+Future versions will add automatic filename shortening to avoid:
 
-* OCR is **English only** by design. Multi-language can be added later via `TESS_LANGS`.
-* Source files are deleted only on successful CSV writes; failures are quarantined.
-* Legacy shell pass scripts are kept out of the execution path (Python passes are used).
+* Windows path length issues,
+* SMB filename issues,
+* ZIP extraction failures.
 
+---
+
+## XLSX Handling
+
+`.xlsx` currently routes to Mandatory Review.
+
+Future versions may add:
+
+* lightweight extraction,
+* OCR conversion fallback,
+* sheet text extraction.
+
+---
+
+# Recommended Workflow
+
+1. Drop files/folders into:
+
+```text
+/data/input/
+```
+
+2. Wait for processing to complete.
+
+3. Review:
+
+* CSV output,
+* TXT files,
+* Mandatory Review,
+* run.log.
+
+4. Adjust config rules as needed.
+
+---
+
+# Version Notes
+
+## 0.1.8 Highlights
+
+* Fixed Mandatory Review temp-name issues
+* Preserved logical embedded filenames
+* Added safe portfolio lineage naming
+* Added configurable extension handling
+* Added render_page_image() OCR helper
+* Reduced OCR renderer fallback spam
+* Added DEBUG_TEMP_MODE
+* Improved runtime cleanup handling
+* Improved portfolio extraction traceability
+* Improved embedded Office handling
+
+```

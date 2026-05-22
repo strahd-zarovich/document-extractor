@@ -8,6 +8,23 @@ def log(msg: str):
 def is_hidden(p: Path) -> bool:
     return p.name.startswith(".")
 
+def safe_name(name: str) -> str:
+    """
+    v0.1.8:
+    Keep extracted portfolio attachment names filesystem-safe.
+
+    Avoid characters like ':' that work poorly across Windows/UnRAID/Samba
+    and can cause confusing Mandatory Review filenames later.
+    """
+    name = str(name or "").strip()
+    if not name:
+        name = "unknown_attachment"
+
+    for ch in '<>:"/\\|?*':
+        name = name.replace(ch, "_")
+
+    return name
+
 def run_cmd(cmd, cwd=None) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
@@ -144,24 +161,38 @@ def main():
 
         # Extract all attachments with pdfdetach
         res = run_cmd(["pdfdetach", "-saveall", "-o", str(out_dir), str(pdf)])
+        
         if res.returncode != 0:
             log(f"ERROR: pdfdetach failed for {pdf.name}: {res.stderr.strip()}")
             continue
+
+        log(f"PORTFOLIO saveall complete: parent={pdf.name} out_dir={out_dir}")
 
         # Normalize perms for extracted files
         children = []
         for child in out_dir.iterdir():
             if child.is_file():
+                # v0.1.8:
+                # Skip our own internal tracking files if this folder is seen again.
+                if child.name.lower() in {"portfolio_manifest.csv", "review_manifest.csv", ".processed.list"}:
+                    continue
+
                 ensure_modes(child, args.puid, args.pgid)
-                # Prefix filename with parent for traceability in your CSV
-                # e.g., Parent.pdf::Child.pdf
-                new_name = f"{pdf.name}::{child.name}"
+
+                # v0.1.8:
+                # Prefix with the parent PDF using filesystem-safe separators.
+                # Avoid "::" because it is not Windows/Samba friendly.
+                old_name = child.name
+                new_name = safe_name(f"{pdf.name}__{old_name}")
                 new_path = child.with_name(new_name)
+
                 try:
                     child.rename(new_path)
+                    log(f"PORTFOLIO child mapped: original={old_name} final={new_path.name}")
                     child = new_path
-                except Exception:
-                    pass
+                except Exception as e:
+                    log(f"WARNING: child rename failed: original={old_name} target={new_name} error={e}")
+
                 children.append(child)
 
         # Write manifest

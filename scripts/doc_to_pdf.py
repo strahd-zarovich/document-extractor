@@ -11,7 +11,10 @@ def convert_to_pdf(doc_path: str, logger=None) -> str:
     Returns path to generated PDF or None on failure.
     """
 
-    workdir = "/tmp/work"
+    # v0.1.8:
+    # Put Office conversion temp files under configured WORK_DIR instead of hardcoded /tmp.
+    # This keeps temp usage visible and controllable from UnRAID/container settings.
+    workdir = os.path.join(os.getenv("WORK_DIR", "/tmp/work"), "office")
     os.makedirs(workdir, exist_ok=True)
 
     # output: random unique name to avoid collisions
@@ -19,6 +22,7 @@ def convert_to_pdf(doc_path: str, logger=None) -> str:
 
     if logger:
         logger.info(f"Fallback DOC→PDF: {os.path.basename(doc_path)} → {pdf_out}")
+        logger.info(f"DOC→PDF temp workdir: {workdir}")
 
     # Option A — LibreOffice (preferred)
     try:

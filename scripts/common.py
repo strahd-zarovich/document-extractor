@@ -40,20 +40,16 @@ def _attach_file_handler(log: logging.Logger, path: str, level: int) -> None:
         ))
         fh.setLevel(level)
         log.addHandler(fh)
+
         # v0.1.4: ensure run.log is group-writable
         try:
             os.chmod(path, 0o664)
         except Exception:
             pass
+        
     except Exception:
         # last resort: print why we couldn't open the file
         print(f"[WARN] could not attach file handler to {path}", file=sys.stderr)
-
-# v0.1.4: ensure run.log is group-writable (UnRAID-friendly)
-try:
-    os.chmod(path, 0o664)   # if your variable is named 'target', use that name
-except Exception:
-    pass
 
 def get_logger(run_log: Optional[str]) -> logging.Logger:
     """
@@ -243,13 +239,82 @@ def likely_scan_only(text_or_samples, min_chars: int = 40, rel_cap: float = 0.15
         return True
     return score_reliability(text) < rel_cap
 
+def _safe_review_name(name: str) -> str:
+    """
+    v0.1.8:
+    Create a safe filename for Mandatory Review.
+
+    This prevents extracted/temp files from landing in Mandatory Review
+    with short random names like C3XWAM~P when we know the original
+    logical filename.
+    """
+    name = os.path.basename(str(name or "")).strip()
+
+    if not name:
+        name = "unknown_file"
+
+    # Keep this conservative for Windows/UnRAID compatibility.
+    for ch in '<>:"/\\|?*':
+        name = name.replace(ch, "_")
+
+    return name
+
 # ---------- manual review ----------
 
-def move_to_manual(file_path: str, out_dir: str, reason: str, note: str = "") -> None:
+def move_to_manual(
+    file_path: str,
+    out_dir: str,
+    reason: str,
+    note: str = "",
+    original_relpath: str = "",
+    write_manifest: bool = False,
+) -> None:
+    """
+    Move a failed/unsupported file to Mandatory Review.
+
+    v0.1.8 changes:
+    - Allows caller to pass original_relpath so Mandatory Review uses the
+      logical/original filename instead of a temporary extraction filename.
+    - Keeps manifest writing optional because process_run.py already writes
+      review_manifest.csv before calling this function.
+    - Adds lightweight move logging for later troubleshooting.
+    """
+    log = logging.getLogger("doc-extractor")
+
     mr = os.path.join(out_dir, "Mandatory Review")
     os.makedirs(mr, exist_ok=True)
-    base = os.path.basename(file_path)
+
+    # Prefer the original logical filename when provided.
+    # This is the key fix for temp files like C3XWAM~P.
+    logical_name = original_relpath or os.path.basename(file_path)
+    base = _safe_review_name(logical_name)
+
     dst = os.path.join(mr, base)
+
+    # Avoid overwriting if duplicate names occur.
+    if os.path.exists(dst):
+        stem, ext = os.path.splitext(base)
+        i = 2
+        while True:
+            candidate = f"{stem}__{i}{ext}"
+            candidate_dst = os.path.join(mr, candidate)
+            if not os.path.exists(candidate_dst):
+                base = candidate
+                dst = candidate_dst
+                break
+            i += 1
+
+    try:
+        log.info(
+            "[MANUAL_MOVE] src=%s logical=%s dst=%s reason=%s",
+            file_path,
+            logical_name,
+            dst,
+            reason,
+        )
+    except Exception:
+        pass
+
     try:
         try:
             os.replace(file_path, dst)
@@ -260,10 +325,16 @@ def move_to_manual(file_path: str, out_dir: str, reason: str, note: str = "") ->
             except Exception:
                 pass
     finally:
-        man = os.path.join(out_dir, "review_manifest.csv")
-        with open(man, "a", newline="", encoding="utf-8") as fh:
-            w = csv.writer(fh, quoting=csv.QUOTE_ALL)
-            w.writerow([base, reason, note])
+        try:
+            os.chmod(dst, 0o664)
+        except Exception:
+            pass
+
+        if write_manifest:
+            man = os.path.join(out_dir, "review_manifest.csv")
+            with open(man, "a", newline="", encoding="utf-8") as fh:
+                w = csv.writer(fh, quoting=csv.QUOTE_ALL)
+                w.writerow([base, reason, note])
 
 # ---------- PDF helpers ----------
 
@@ -369,6 +440,61 @@ def sample_page_indices(total_pages: int, target: int = 5):
                 if len(picks) == t:
                     break
     return sorted(picks)
+
+def render_page_image(pdf_or_page, page_index=None, dpi: int = 300, grayscale: bool = True):
+    """
+    v0.1.8:
+    Shared PDF page renderer for OCR passes.
+
+    Supports the main signature used by OCR-A/OCR-B:
+        render_page_image(pdf_path, page_index, dpi, grayscale)
+
+    Also supports a fitz.Page object:
+        render_page_image(page_obj, dpi, grayscale)
+
+    Returns:
+        PIL.Image.Image
+    """
+    try:
+        import fitz  # type: ignore
+        from PIL import Image  # type: ignore
+    except Exception as e:
+        raise RuntimeError(f"render_page_image dependencies unavailable: {e}")
+
+    # Case 1:
+    # render_page_image(page_obj, dpi, grayscale)
+    # When first arg is a fitz page, the second arg is actually dpi.
+    if hasattr(pdf_or_page, "get_pixmap"):
+        page = pdf_or_page
+
+        # Support render_page_image(page_obj, dpi, grayscale)
+        if isinstance(page_index, int):
+            actual_dpi = page_index
+        else:
+            actual_dpi = dpi
+
+        actual_grayscale = bool(grayscale)
+
+        pix = page.get_pixmap(
+            dpi=actual_dpi,
+            colorspace=fitz.csGRAY if actual_grayscale else None,
+        )
+        mode = "L" if actual_grayscale else ("RGB" if pix.alpha == 0 and pix.n >= 3 else "L")
+        return Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+
+    # Case 2:
+    # render_page_image(pdf_path, page_index, dpi, grayscale)
+    pdf_path = str(pdf_or_page)
+    idx = int(page_index if page_index is not None else 0)
+
+    with fitz.open(pdf_path) as doc:
+        page = doc.load_page(idx)
+        pix = page.get_pixmap(
+            dpi=int(dpi),
+            colorspace=fitz.csGRAY if grayscale else None,
+        )
+        mode = "L" if grayscale else ("RGB" if pix.alpha == 0 and pix.n >= 3 else "L")
+        return Image.frombytes(mode, (pix.width, pix.height), pix.samples)
 
 # ---------- OCR helper ----------
 

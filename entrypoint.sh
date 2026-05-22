@@ -27,6 +27,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-/data/output}"
 WORK_DIR="${WORK_DIR:-/data/tmp}"
 LOG_DIR="${LOG_DIR:-/data/logs}"
 CONFIG_DIR="${CONFIG_DIR:-/data/config}"
+DEBUG_TEMP_MODE="${DEBUG_TEMP_MODE:-false}"
 
 INPUT_STABLE_SECS="${INPUT_STABLE_SECS:-15}"
 INPUT_CHECK_INTERVAL="${INPUT_CHECK_INTERVAL:-15}"
@@ -41,6 +42,7 @@ PASS_OCR_A_CUTOFF="${PASS_OCR_A_CUTOFF:-0.65}"
 PASS_OCR_B_CUTOFF="${PASS_OCR_B_CUTOFF:-0.55}"
 BIGPDF_SIZE_LIMIT_MB="${BIGPDF_SIZE_LIMIT_MB:-50}"
 BIGPDF_PAGE_LIMIT="${BIGPDF_PAGE_LIMIT:-500}"
+
 
 # ---------- Prepare directories & perms ----------
 
@@ -85,6 +87,7 @@ log INFO "Startup config:"
 log INFO "  INPUT_DIR=$INPUT_DIR"
 log INFO "  OUTPUT_DIR=$OUTPUT_DIR"
 log INFO "  WORK_DIR=$WORK_DIR"
+log INFO "  DEBUG_TEMP_MODE=$DEBUG_TEMP_MODE"
 log INFO "  LOG_DIR=$LOG_DIR"
 log INFO "  PUID=$PUID PGID=$PGID UMASK=$UMASK"
 log INFO "  STABLE_SECS=$INPUT_STABLE_SECS CHECK_INTERVAL=$INPUT_CHECK_INTERVAL"
@@ -101,6 +104,21 @@ def v(m):
         return 'missing'
 print(f"[VERSIONS] PyMuPDF={v('fitz')} pdfminer={v('pdfminer')} Pillow={v('PIL')} pytesseract={v('pytesseract')}")
 PY
+
+# ---------- Startup temp cleanup ----------
+# v0.1.8:
+# Remove old portfolio stash folders from previous runs.
+# Uses -mtime +1 so it does not touch same-day active/debug work.
+if [[ "${DEBUG_TEMP_MODE}" != "true" ]]; then
+  if [[ -d "$WORK_DIR/portfolio_hidden" ]]; then
+    # Only clean first-level run folders.
+    # Avoid recursive deep cleanup of active nested processing.
+    find "$WORK_DIR/portfolio_hidden" -mindepth 1 -maxdepth 1 -type d -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+    log INFO "Startup temp cleanup checked: $WORK_DIR/portfolio_hidden"
+  fi
+else
+  log INFO "DEBUG_TEMP_MODE=true; startup temp cleanup skipped"
+fi
 
 # ---------- Main watcher loop ----------
 log INFO "Watcher starting as $(id -u):$(id -g); waiting for input quiescence..."
