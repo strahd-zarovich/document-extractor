@@ -65,6 +65,7 @@ for file in /app/defaults/*; do
 
     if [ ! -f "$CONFIG_DIR/$filename" ]; then
         cp "$file" "$CONFIG_DIR/$filename"
+        chmod 664 "$CONFIG_DIR/$filename" || true
         echo "[INFO] Seeded default config: $filename"
     fi
 done

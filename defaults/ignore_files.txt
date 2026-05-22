@@ -1,1 +1,3 @@
 portfolio_manifest.csv
+review_manifest.csv
+.processed.list

@@ -1,6 +1,9 @@
 .msg
 .wav
+.mp3
 .tmp
 .lnk
 .ds_store
 .thumbs.db
+.ptx
+.pptx
