@@ -8,7 +8,7 @@ Run orchestrator:
  - On success: write CSV and DELETE source
  - On failure/unsupported: move to Mandatory Review and record reason
 """
-import os, sys, csv, subprocess
+import os, sys, csv, subprocess, shutil
 from pathlib import Path
 from typing import List, Optional
 
@@ -17,6 +17,9 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 import common
+import review_manifest
+
+from run_summary import RunSummary, log_summary, write_summary_json
 
 CSV_HEADER = [
     "original_file",
@@ -108,19 +111,17 @@ def _write_header_if_needed(csv_path: Path):
             pass
 
 def _append_review_manifest(out_dir: Path, relpath: str, reason: str):
-    manifest = out_dir / "review_manifest.csv"
-    new = not manifest.exists()
-    with manifest.open("a", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        if new:
-            w.writerow(["filename", "reason"])
-        w.writerow([relpath, reason])
-    if new:
-        # NEW: ensure group-writable file mode when first created
-        try:
-            os.chmod(manifest, 0o664)
-        except Exception:
-            pass
+    """
+    v0.1.9:
+    Keep process_run.py orchestration-focused.
+    Manifest formatting lives in review_manifest.py.
+    """
+    review_manifest.write_review_row(
+        out_dir=out_dir,
+        filename=Path(relpath).name,
+        reason=reason,
+        original_full_name=relpath,
+    )
 
 def _call_script(script: str, args: List[str]) -> int:
     cmd = [sys.executable, script] + args
@@ -191,6 +192,7 @@ def main():
     _ensure_dirs(run_dir, output_dir)
 
     run_name = run_dir.name
+    summary = RunSummary(run_name=run_name)
     single_file_name = _is_single_file_run(run_dir)
     csv_path = _csv_path_for_run(run_name, output_dir, single_file_name)
     _write_header_if_needed(csv_path)
@@ -202,12 +204,14 @@ def main():
         # Don't descend into Mandatory Review folders if any
         dirs[:] = [d for d in dirs if d.lower() != "mandatory review"]
         for fname in files:
+            summary.inc("files_seen")
             fpath = Path(root) / fname
             relpath = str(fpath.relative_to(run_dir))
             kind = _route_ext(fpath)
 
             if kind == "noise_delete":
                 logger.info(f"Noise file (auto-delete): {relpath}")
+                summary.inc("files_noise_deleted")
                 try:
                     _delete_path(fpath)
                 except Exception:
@@ -216,6 +220,7 @@ def main():
 
             if kind == "ignore":
                 logger.info(f"Ignored file: {relpath}")
+                summary.inc("files_ignored")
                 continue
 
             if kind == "manual_review":
@@ -227,6 +232,7 @@ def main():
                     "manual_review_ext",
                     original_relpath=relpath,
                 )
+                summary.inc("files_manual_review")
                 continue
 
             if kind == "unsupported":
@@ -239,6 +245,8 @@ def main():
                     "unsupported",
                     original_relpath=relpath,
                 )
+                summary.inc("files_unsupported")
+                summary.inc("files_manual_review")
                 continue
 
             # Decide target script
@@ -262,18 +270,25 @@ def main():
                     "pass_script_missing",
                     original_relpath=relpath,
                 )
+                summary.inc("missing_pass_scripts")
+                summary.inc("files_manual_review")
                 continue
 
+            summary.inc("files_processed")
             # Call the pass
             rc = _call_script(str(script), [str(fpath), str(csv_path), str(run_log_path)])
 
             if rc == 0:
                 # success -> DELETE source
                 _delete_path(fpath)
+                summary.inc("files_accepted")
+                summary.inc("files_deleted_success")
                 logger.info(f"Accepted & deleted: {relpath}")
             else:
                 # failed -> Mandatory Review with reason
                 reason = f"pass rc={rc}"
+                summary.inc("pass_failures")
+                summary.inc("files_manual_review")
                 logger.warning(f"Quarantining: {relpath} :: {reason}")
                 _append_review_manifest(output_dir, relpath, reason)
                 common.move_to_manual(
@@ -291,6 +306,7 @@ def main():
         try:
             if not any(Path(root).iterdir()):
                 p.rmdir()
+                summary.inc("cleanup_empty_dirs_removed")
         except Exception:
             pass
 
@@ -345,13 +361,17 @@ def main():
         # DEBUG_TEMP_MODE keeps portfolio stash files for inspection after a run.
         # Normal mode still removes the run-specific stash to avoid old parent PDFs piling up.
         if os.getenv("DEBUG_TEMP_MODE", "false").lower() == "true":
+            summary.inc("cleanup_portfolio_stash_kept_debug")
             logger.info(f"DEBUG_TEMP_MODE=true; keeping portfolio stash for inspection: {stash_dir}")
         elif stash_dir.exists():
             shutil.rmtree(stash_dir, ignore_errors=True)
+            summary.inc("cleanup_portfolio_stash_removed")
             logger.info(f"Cleaned portfolio stash: {stash_dir}")
     except Exception as e:
         logger.warning(f"Stash cleanup skipped: {e}")
 
+    log_summary(summary, logger)
+    write_summary_json(summary, output_dir)
     logger.info(f"Run end: {run_name}")
     return 0
 

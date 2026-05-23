@@ -1,29 +1,14 @@
 #!/usr/bin/env python3
 import argparse, os, re, shlex, subprocess, sys, csv, time, shutil
 from pathlib import Path
+from filename_policy import safe_output_filename
+from lineage import build_lineage_metadata
 
 def log(msg: str):
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%SZ', time.gmtime())}] {msg}", flush=True)
 
 def is_hidden(p: Path) -> bool:
     return p.name.startswith(".")
-
-def safe_name(name: str) -> str:
-    """
-    v0.1.8:
-    Keep extracted portfolio attachment names filesystem-safe.
-
-    Avoid characters like ':' that work poorly across Windows/UnRAID/Samba
-    and can cause confusing Mandatory Review filenames later.
-    """
-    name = str(name or "").strip()
-    if not name:
-        name = "unknown_attachment"
-
-    for ch in '<>:"/\\|?*':
-        name = name.replace(ch, "_")
-
-    return name
 
 def run_cmd(cmd, cwd=None) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -60,17 +45,50 @@ def space_ok(dir_path: Path, min_bytes: int = 1_000_000_000) -> bool:
     except Exception:
         return True  # if we can't tell, don't block
 
-def write_manifest(folder: Path, parent_pdf: Path, children: list[Path]):
+def write_manifest(folder: Path, parent_pdf: Path, children: list[dict]):
+    """
+    v0.1.9:
+    Write portfolio extraction manifest with forensic lineage metadata.
+
+    child_name:
+        Final physical filename after safe filename policy.
+
+    original_full_name:
+        Full generated name before truncation.
+
+    portfolio_path:
+        Readable forensic parent/child path.
+    """
     mf = folder / "portfolio_manifest.csv"
     with mf.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["parent_pdf","child_name","child_relpath","size_bytes"])
-        for c in children:
+        w.writerow([
+            "parent_pdf",
+            "child_name",
+            "child_relpath",
+            "size_bytes",
+            "original_full_name",
+            "portfolio_path",
+        ])
+
+        for item in children:
+            c = item["path"]
+            meta = item.get("lineage", {})
+
             try:
                 size = c.stat().st_size
             except Exception:
                 size = ""
-            w.writerow([parent_pdf.name, c.name, str(c.relative_to(folder)), size])
+
+            w.writerow([
+                parent_pdf.name,
+                c.name,
+                str(c.relative_to(folder)),
+                size,
+                meta.get("original_full_name", ""),
+                meta.get("portfolio_path", ""),
+            ])
+
     return mf
 
 def hide_or_move_parent_to_workdir(parent_pdf: Path, input_root: Path, work_dir: Path, puid: int, pgid: int) -> bool:
@@ -183,7 +201,7 @@ def main():
                 # Prefix with the parent PDF using filesystem-safe separators.
                 # Avoid "::" because it is not Windows/Samba friendly.
                 old_name = child.name
-                new_name = safe_name(f"{pdf.name}__{old_name}")
+                new_name = safe_output_filename(f"{pdf.name}__{old_name}")
                 new_path = child.with_name(new_name)
 
                 try:
@@ -193,7 +211,16 @@ def main():
                 except Exception as e:
                     log(f"WARNING: child rename failed: original={old_name} target={new_name} error={e}")
 
-                children.append(child)
+                lineage_meta = build_lineage_metadata(
+                    physical_name=child.name,
+                    original_full_name=f"{pdf.name}__{old_name}",
+                    source_path=str(child),
+                )
+
+                children.append({
+                    "path": child,
+                    "lineage": lineage_meta,
+                })
 
         # Write manifest
         mf = write_manifest(out_dir, pdf, children)
