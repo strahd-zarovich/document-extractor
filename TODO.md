@@ -1,5 +1,65 @@
 # TODO
 
+## Done (0.1.8 → 0.1.9)
+
+### Filename Length / Path Safety
+- Added centralized filename policy helper:
+  - `scripts/filename_policy.py`
+- Added safe filename sanitization for extracted/embedded files
+- Added filename length limiting to prevent Windows / SMB / path-length failures
+- Preserved file extensions when shortening long filenames
+- Added stable hash suffixes for shortened filenames
+- Integrated filename policy into portfolio extraction
+- Preserved readable physical filenames while avoiding unusable long paths
+
+### Forensic Lineage / Portfolio Traceability
+- Added centralized lineage helper:
+  - `scripts/lineage.py`
+- Added forensic parent-child path metadata
+- Preserved original full generated names outside the physical filename
+- Added readable portfolio path format:
+  - `Parent PDF / Embedded PDF / Attachment`
+- Integrated lineage metadata into `portfolio_manifest.csv`
+- Confirmed portfolio manifests are ignored by normal processing
+- Confirmed extracted portfolio children are processed normally
+
+### Review Manifest Standardization
+- Added centralized review manifest helper:
+  - `scripts/review_manifest.py`
+- Centralized `review_manifest.csv` writing
+- Added normalized Manual Review reason handling
+- Expanded review manifest metadata support:
+  - filename
+  - reason
+  - portfolio_path
+  - original_full_name
+- Kept `process_run.py` focused on orchestration instead of manifest formatting
+
+### Run Summary / Reporting
+- Added centralized run summary helper:
+  - `scripts/run_summary.py`
+- Added run-level counters for:
+  - files seen
+  - files processed
+  - files accepted
+  - files deleted after success
+  - files moved to Manual Review
+  - unsupported files
+  - ignored files
+  - noise-deleted files
+  - pass failures
+  - missing pass scripts
+  - cleanup actions
+- Added run-end summary logging
+- Added `run_summary.json` output
+
+### Runtime / Logging Cleanup
+- Identified harmless startup permission noise from bind-mounted config files
+- Planned stderr suppression for best-effort `chgrp/chmod` startup permission normalization
+- Confirmed OCR renderer helper is working during large-file testing
+- Confirmed `.ptx` noise-delete policy works during live run testing
+- Confirmed `.doc` Manual Review routing works during live run testing
+
 ## Done (0.1.7 → 0.1.8)
 
 ### Manual Review / Filename Preservation
@@ -169,24 +229,42 @@
 
 ---
 
-## Near-term
+## Planned Roadmap
 
-### Filename Length / Path Safety
-- Add filename length limiting for extracted portfolio / embedded files
-- Preserve file extension when shortening long names
-- Preserve useful parent-child lineage while avoiding unusable long filenames
-- Add suffix marker for shortened names, such as:
-  - __CUT
-  - __TRUNC
-- Consider adding short hash suffix to avoid collisions
-- Apply filename length safety in:
-  - common.py
-  - portfolio_unpack.py
-- Goal:
-  - prevent files from failing to open due to Windows / SMB / path length issues
+### 0.1.10 — Config + Logging Polish
 
-### Manual Review / Failure Handling
-- Standardize Manual Review reasons:
+#### Startup Config Logging
+- Print actual active config values from:
+  - `config.conf`
+  - environment variables
+- Expand startup cutoff banner to distinguish:
+  - DOC cutoff
+  - DOCX cutoff
+- Prevent confusion during runtime log review
+- Ensure startup logging reflects runtime-configured values instead of static text
+
+#### Startup Permission Noise
+- Suppress harmless startup permission errors from bind-mounted config files:
+  - `chgrp: Operation not permitted`
+  - `chmod: Operation not permitted`
+- Keep permission normalization best-effort only
+- Add comments explaining some bind mounts do not allow ownership/permission changes
+
+#### Documentation Alignment
+- Keep README, TODO, and defaults aligned
+- Verify Office handling documentation matches actual behavior:
+  - `.doc`   -> Manual Review
+  - `.xlsx`  -> Manual Review
+  - `.pptx`  -> Delete
+  - `.ptx`   -> Delete
+  - `.msg`   -> Delete
+
+---
+
+### 0.1.11 — Failure Metadata
+
+#### Manual Review / Failure Handling
+- Continue standardizing Manual Review reasons:
   - pass_rc
   - unsupported_ext
   - low_workdir_space
@@ -195,81 +273,171 @@
   - spreadsheet_manual_review
   - temp_processing_failure
   - embedded_extract_failure
-- Add sidecar failure metadata files:
-  - filename.failed.json
-  - include:
-    - source file
-    - embedded filename
-    - extraction method
-    - temp path
-    - failure reason
-    - traceback if available
 
-### Cleanup / Processing Control
+#### Failure Sidecar Metadata
+- Add optional sidecar failure metadata files:
+  - `filename.failed.json`
+- Include:
+  - source file
+  - original full filename
+  - portfolio path
+  - embedded filename
+  - extraction method
+  - temp path
+  - failure reason
+  - traceback if available
+
+#### Integration Goals
+- Integrate with:
+  - `filename_policy.py`
+  - `lineage.py`
+  - `review_manifest.py`
+
+#### TXT Header Lineage
+- Add forensic source lineage to the top of generated TXT files
+- Include:
+  - source file
+  - original full filename
+  - portfolio path
+  - embedded parent
+  - embedded child
+  - extraction source/type
+- Goal:
+  - allow each TXT file to stand alone as evidence-traceable output
+  - make it easy to answer: “Where did this document come from?”
+
+---
+
+### 0.1.12 — Cleanup Recovery
+
+#### Cleanup / Processing Control
 - Improve cleanup reliability after exceptions:
   - remove orphan temp files
   - remove partial extraction dirs
   - remove abandoned temp artifacts
-- Add cleanup reporting summary:
+
+#### Interrupted Run Recovery
+- Add interrupted-run cleanup handling
+- Detect abandoned extraction folders
+- Detect stale temp artifacts
+
+#### Cleanup Reporting
+- Expand cleanup reporting summary:
   - temp files created
   - temp files deleted
   - orphan temp files removed
   - failed cleanup attempts
 
-### DOC / XLSX / Office Handling
-- Decide final `.xlsx` handling:
-  - lightweight extraction with openpyxl, or
-  - Manual Review
-- Decide whether old `.doc` should stay Manual Review permanently
-- Keep `.pptx`, `.ptx`, and `.msg` deleted unless future use-case changes
+#### DEBUG_TEMP_MODE
+- Add optional DEBUG_TEMP_MODE temp-folder reporting/viewer
 
-### Portfolio / Embedded Extraction
+---
+
+### 0.1.13 — Portfolio / Embedded Statistics
+
+#### Portfolio / Embedded Extraction
 - Add persistent temp-file metadata registry:
   - temp path
   - source file
   - embedded filename
   - final output filename
   - extraction source
-- Add extraction lineage tracking:
+
+#### Expanded Extraction Lineage
+- Expand extraction lineage tracking:
   Example:
     Parent PDF
       -> embedded XLSX
         -> converted PDF
           -> OCR TXT
+
+#### Embedded Attachment Statistics
 - Add embedded attachment extraction statistics:
   - extracted attachments
   - attachment types
   - failures
   - Manual Review moves
 
-### OCR / Rendering / Performance
-- Add image render cache between OCR-A and OCR-B
-- Parallel OCR for large PDFs with capped concurrency
-- Add optional detailed OCR confidence reporting
+#### Portfolio Reporting
+- Add portfolio extraction statistics:
+  - total portfolios processed
+  - embedded attachment counts
+  - embedded extraction failures
+  - attachment-type distribution
 
-### Validation / Performance
-- Checksum cache to skip reprocessing duplicates
-- Golden test set + quick validation script
+---
+
+### 0.1.14 — Validation + Reporting
+
+#### Validation / Performance
+- Add golden test set + quick validation script
 - Add per-file processing summary output
 - Add extraction pipeline timing statistics
 
-### WebUI
+#### Unsupported File Reporting
+- Add better unsupported-file reporting:
+  - group by extension/type
+  - reduce repetitive log spam
+
+#### Reporting Improvements
+- Add expanded extraction timing visibility
+- Add extraction-stage statistics
+- Add reliability-distribution reporting
+
+---
+
+### 0.1.15 — Office / XLSX Handling
+
+#### DOC / XLSX / Office Handling
+- Decide final `.xlsx` handling:
+  - lightweight extraction with openpyxl, or
+  - Manual Review
+
+#### XLSX Extraction
+- If enabled:
+  - create `pass_xlsx.py`
+  - keep XLSX extraction lightweight and isolated
+
+#### DOC Handling
+- Decide whether old `.doc` should stay Manual Review permanently
+
+#### Stability Requirement
+- Delay XLSX extraction support until:
+  - forensic metadata system is stable
+  - validation framework is mature
+
+---
+
+### 0.1.16 — OCR / Rendering Performance
+
+#### OCR / Rendering / Performance
+- Add image render cache between OCR-A and OCR-B
+- Add optional detailed OCR confidence reporting
+
+#### Parallel OCR
+- Add parallel OCR for large PDFs with capped concurrency
+- Keep memory usage bounded and predictable
+
+#### Validation / Performance
+- Add checksum cache to skip reprocessing duplicates
+
+---
+
+### 0.1.17+ — WebUI
+
+#### WebUI
 - WebUI thin control panel:
   - upload files/folders into `/appdata/input`
   - trigger existing scripts
   - show logs/status
   - download zipped `/appdata/output`
-- WebUI editor for file-rule lists later
 
----
+#### WebUI Rule Management
+- Add WebUI editor for file-rule lists later:
+  - delete extensions
+  - ignore files
+  - manual review extensions
 
-## Optional enhancements
-- Add stronger filename sanitization utility:
-  - illegal characters
-  - duplicate separators
-  - long paths
-  - Windows reserved names
-- Add optional DEBUG_TEMP_MODE output viewer / temp folder report
-- Add better unsupported-file reporting:
-  - group by extension/type
-  - reduce repetitive log spam
+#### Long-term Goals
+- Keep WebUI thin and orchestration-focused
+- Avoid embedding extraction logic into the frontend

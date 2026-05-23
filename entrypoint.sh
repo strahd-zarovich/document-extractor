@@ -48,8 +48,10 @@ BIGPDF_PAGE_LIMIT="${BIGPDF_PAGE_LIMIT:-500}"
 
 mkdir -p "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" "$CONFIG_DIR"
 umask "$UMASK"
-chgrp -R "${PGID}" "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" "$CONFIG_DIR" || true
-chmod -R g+rwX       "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" "$CONFIG_DIR" || true
+# Best-effort permission normalization.
+# Some bind mounts may not allow chgrp/chmod; suppress errors because this is non-fatal.
+chgrp -R "${PGID}" "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" "$CONFIG_DIR" 2>/dev/null || true
+chmod -R g+rwX "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" "$CONFIG_DIR" 2>/dev/null || true
 chmod g+s "$INPUT_DIR" "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR" "$CONFIG_DIR" 2>/dev/null || true
 
 # Ensure the running script and its directory are traversable by unprivileged user

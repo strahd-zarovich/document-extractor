@@ -1,5 +1,4 @@
-````markdown
-# Document Extractor Docker (0.1.8)
+# Document Extractor Docker (0.1.9)
 
 A Docker-based document extraction pipeline designed for large mixed-document collections.
 
@@ -21,6 +20,7 @@ The goal is:
 # Major Features
 
 ## Multi-Pass PDF Processing
+
 PDFs are processed in stages:
 
 1. TXT extraction
@@ -33,6 +33,7 @@ Each stage uses reliability scoring before acceptance.
 ---
 
 ## Reliability Scoring
+
 Every extraction path generates a reliability score:
 
 - TXT
@@ -46,17 +47,18 @@ Reliability values are written into the CSV output.
 ---
 
 ## One TXT Per Source Document
+
 Each processed document produces:
 
 ```text
 document.txt
-````
+```
 
 with:
 
-* metadata header,
-* page separators,
-* normalized UTF-8 output.
+- metadata header,
+- page separators,
+- normalized UTF-8 output.
 
 ---
 
@@ -64,17 +66,24 @@ with:
 
 PDF portfolios and embedded attachments are automatically extracted.
 
-Embedded children preserve parent lineage:
+Embedded children preserve forensic parent-child lineage.
+
+Example lineage:
 
 ```text
-Parent.pdf__Child.xlsx
+Parent.pdf / Embedded.pdf / Child.xlsx
 ```
 
-This allows tracing:
+Physical filenames are automatically shortened when necessary to avoid:
 
-* embedded Office files,
-* embedded PDFs,
-* nested attachment chains.
+- Windows path-length issues
+- SMB filename issues
+- extraction failures from excessively long embedded names
+
+Lineage metadata is preserved inside:
+
+- portfolio_manifest.csv
+- review_manifest.csv
 
 Parent portfolio PDFs are moved into:
 
@@ -96,10 +105,16 @@ Mandatory Review/
 
 with:
 
-* readable logical filenames,
-* preserved embedded lineage,
-* review_manifest.csv,
-* detailed logging.
+- readable logical filenames,
+- preserved embedded lineage,
+- review_manifest.csv,
+- detailed logging.
+
+Review manifests preserve:
+
+- original full generated filenames
+- portfolio lineage paths
+- normalized review reasons
 
 Random temp names like:
 
@@ -107,7 +122,7 @@ Random temp names like:
 C3XWAM~P
 ```
 
-are no longer used in 0.1.8.
+are no longer used in 0.1.8+.
 
 ---
 
@@ -121,9 +136,9 @@ Behavior is controlled through editable config files:
 
 Including:
 
-* delete_extensions.txt
-* ignore_files.txt
-* manual_review_extensions.txt
+- delete_extensions.txt
+- ignore_files.txt
+- manual_review_extensions.txt
 
 ---
 
@@ -139,9 +154,9 @@ If a config file already exists inside:
 
 it will NOT be overwritten during:
 
-* container rebuilds,
-* image updates,
-* version upgrades.
+- container rebuilds,
+- image updates,
+- version upgrades.
 
 This is intentional so user-customized rules survive upgrades.
 
@@ -156,7 +171,7 @@ To receive newer default rules:
 
 ---
 
-# Current File Policies (0.1.8)
+# Current File Policies (0.1.9)
 
 ## Auto-Delete Extensions
 
@@ -182,8 +197,8 @@ These currently route directly to Mandatory Review:
 
 Reason:
 
-* old DOC conversion is unreliable,
-* XLSX extraction policy is still under evaluation.
+- old DOC conversion is unreliable,
+- XLSX extraction policy is still under evaluation.
 
 ---
 
@@ -255,6 +270,7 @@ Example:
 /output/MyRun/
 ├── MyRun.csv
 ├── run.log
+├── run_summary.json
 ├── Mandatory Review/
 └── extracted txt files
 ```
@@ -277,9 +293,9 @@ filename,page,text,method,used_ocr,reliability
 
 Balanced OCR mode:
 
-* faster,
-* lower resource usage,
-* preferred first OCR fallback.
+- faster,
+- lower resource usage,
+- preferred first OCR fallback.
 
 ---
 
@@ -287,9 +303,9 @@ Balanced OCR mode:
 
 Aggressive OCR mode:
 
-* slower,
-* more tolerant of poor scans,
-* final OCR fallback before Mandatory Review.
+- slower,
+- more tolerant of poor scans,
+- final OCR fallback before Mandatory Review.
 
 ---
 
@@ -318,9 +334,9 @@ to preserve temporary processing files after a run.
 
 Useful for:
 
-* OCR debugging,
-* portfolio extraction debugging,
-* temp-file troubleshooting.
+- OCR debugging,
+- portfolio extraction debugging,
+- temp-file troubleshooting.
 
 Default:
 
@@ -334,16 +350,37 @@ false
 
 The container automatically:
 
-* removes completed portfolio stash folders,
-* removes stale temporary extraction folders,
-* cleans empty run folders,
-* deletes successful inputs.
+- removes completed portfolio stash folders,
+- removes stale temporary extraction folders,
+- cleans empty run folders,
+- deletes successful inputs.
 
 Cleanup behavior respects:
 
 ```text
 DEBUG_TEMP_MODE
 ```
+
+---
+
+# Run Summary Reporting
+
+Each run generates:
+
+```text
+/output/<run>/run_summary.json
+```
+
+This includes:
+
+- files seen
+- files processed
+- files accepted
+- Manual Review counts
+- ignored files
+- cleanup actions
+- pass failures
+- unsupported files
 
 ---
 
@@ -358,11 +395,11 @@ Main logs:
 
 Additional logging includes:
 
-* OCR stage transitions,
-* portfolio extraction mapping,
-* Manual Review moves,
-* cleanup operations,
-* reliability decisions.
+- OCR stage transitions,
+- portfolio extraction mapping,
+- Manual Review moves,
+- cleanup operations,
+- reliability decisions.
 
 ---
 
@@ -411,9 +448,9 @@ UMASK=0002
 
 Designed for:
 
-* UnRAID
-* Docker bind mounts
-* SMB shares
+- UnRAID
+- Docker bind mounts
+- SMB shares
 
 ---
 
@@ -422,7 +459,7 @@ Designed for:
 ```yaml
 services:
   document-extractor:
-    image: strahdzarovich/document-extractor:0.1.8
+    image: strahdzarovich/document-extractor:0.1.9
     container_name: document-extractor
 
     environment:
@@ -447,17 +484,24 @@ services:
 
 ## Long Embedded Filenames
 
-Deeply nested embedded attachments can create very long filenames:
+0.1.9 adds automatic filename shortening for deeply nested embedded files.
 
-```text
-Parent.pdf__Embedded.pdf__Child.xlsx
-```
+Shortened filenames preserve:
 
-Future versions will add automatic filename shortening to avoid:
+- extensions
+- readability
+- collision resistance via short hashes
 
-* Windows path length issues,
-* SMB filename issues,
-* ZIP extraction failures.
+Forensic lineage is preserved separately through:
+
+- portfolio_manifest.csv
+- review_manifest.csv
+
+Additional validation is still ongoing for:
+
+- extremely deep nested attachments
+- Windows SMB edge cases
+- archive extraction edge cases
 
 ---
 
@@ -467,9 +511,9 @@ Future versions will add automatic filename shortening to avoid:
 
 Future versions may add:
 
-* lightweight extraction,
-* OCR conversion fallback,
-* sheet text extraction.
+- lightweight extraction,
+- OCR conversion fallback,
+- sheet text extraction.
 
 ---
 
@@ -485,10 +529,11 @@ Future versions may add:
 
 3. Review:
 
-* CSV output,
-* TXT files,
-* Mandatory Review,
-* run.log.
+- CSV output,
+- TXT files,
+- Mandatory Review,
+- run.log,
+- run_summary.json.
 
 4. Adjust config rules as needed.
 
@@ -496,17 +541,34 @@ Future versions may add:
 
 # Version Notes
 
+## 0.1.9 Highlights
+
+- Added centralized filename policy system
+- Added automatic long-filename shortening
+- Added forensic lineage metadata tracking
+- Added lineage-aware portfolio manifests
+- Added centralized review manifest handling
+- Added run_summary.json reporting
+- Added run-level cleanup/process counters
+- Improved architecture separation between:
+  - orchestration
+  - filename policy
+  - lineage tracking
+  - manifest writing
+  - reporting
+- Confirmed portfolio extraction stability during large mixed-document testing
+
+---
+
 ## 0.1.8 Highlights
 
-* Fixed Mandatory Review temp-name issues
-* Preserved logical embedded filenames
-* Added safe portfolio lineage naming
-* Added configurable extension handling
-* Added render_page_image() OCR helper
-* Reduced OCR renderer fallback spam
-* Added DEBUG_TEMP_MODE
-* Improved runtime cleanup handling
-* Improved portfolio extraction traceability
-* Improved embedded Office handling
-
-```
+- Fixed Mandatory Review temp-name issues
+- Preserved logical embedded filenames
+- Added safe portfolio lineage naming
+- Added configurable extension handling
+- Added render_page_image() OCR helper
+- Reduced OCR renderer fallback spam
+- Added DEBUG_TEMP_MODE
+- Improved runtime cleanup handling
+- Improved portfolio extraction traceability
+- Improved embedded Office handling
