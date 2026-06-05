@@ -273,6 +273,11 @@
   - spreadsheet_manual_review
   - temp_processing_failure
   - embedded_extract_failure
+  - corrupt_pdf
+  - bad_magic
+  - partial_attachment
+  - invalid_container
+  - mismatched_extension
 
 #### Failure Sidecar Metadata
 - Add optional sidecar failure metadata files:
@@ -280,6 +285,11 @@
 - Include:
   - source file
   - original full filename
+  - normalized filename
+  - original extension
+  - normalized extension
+  - detected MIME type
+  - detected magic-byte type
   - portfolio path
   - embedded filename
   - extraction method
@@ -298,6 +308,11 @@
 - Include:
   - source file
   - original full filename
+  - normalized filename
+  - original extension
+  - normalized extension
+  - detected MIME type
+  - detected magic-byte type
   - portfolio path
   - embedded parent
   - embedded child
@@ -327,6 +342,15 @@
   - temp files deleted
   - orphan temp files removed
   - failed cleanup attempts
+
+#### Ignored Manifest Cleanup
+- Delete known ignored artifacts automatically:
+  - `portfolio_manifest.csv`
+  - abandoned extraction manifests
+  - stale processing markers
+- Remove empty `__portfolio` folders automatically
+- Improve empty directory cleanup reliability
+- Prevent ignored-file cleanup loops
 
 #### DEBUG_TEMP_MODE
 - Add optional DEBUG_TEMP_MODE temp-folder reporting/viewer
@@ -358,6 +382,18 @@
   - failures
   - Manual Review moves
 
+#### Embedded Artifact Classification
+- Track:
+  - malformed attachments
+  - duplicate collision artifacts
+  - encrypted content
+  - forensic export artifacts
+  - partial container exports
+- Examples:
+  - `.rpmsg`
+  - `.pdf_8`
+  - `.xmef`
+
 #### Portfolio Reporting
 - Add portfolio extraction statistics:
   - total portfolios processed
@@ -379,6 +415,22 @@
   - group by extension/type
   - reduce repetitive log spam
 
+#### Extension Distribution Reporting
+- Add grouped extension statistics:
+  - extension frequency
+  - unsupported extension counts
+  - Manual Review grouped by extension
+  - corrupt file counts
+  - normalized filename counts
+
+#### OCR Escalation Reporting
+- Add OCR-stage statistics:
+  - native accepted
+  - OCR escalated
+  - OCR accepted
+  - OCR rejected
+  - borderline reliability files
+
 #### Reporting Improvements
 - Add expanded extraction timing visibility
 - Add extraction-stage statistics
@@ -397,6 +449,12 @@
 - If enabled:
   - create `pass_xlsx.py`
   - keep XLSX extraction lightweight and isolated
+- Initial scope:
+  - workbook metadata
+  - sheet names
+  - row counts
+  - lightweight text extraction
+  - hidden sheet detection
 
 #### DOC Handling
 - Decide whether old `.doc` should stay Manual Review permanently
@@ -413,6 +471,12 @@
 #### OCR / Rendering / Performance
 - Add image render cache between OCR-A and OCR-B
 - Add optional detailed OCR confidence reporting
+
+#### OCR Escalation Threshold Tuning
+- Review OCR escalation comparison logic:
+  - `<= cutoff`
+  - vs `< cutoff`
+- Reduce unnecessary OCR escalation for borderline files
 
 #### Parallel OCR
 - Add parallel OCR for large PDFs with capped concurrency
@@ -441,3 +505,32 @@
 #### Long-term Goals
 - Keep WebUI thin and orchestration-focused
 - Avoid embedding extraction logic into the frontend
+
+---
+
+### 0.1.18+ — Forensic Dataset Support
+
+#### Legal / eDiscovery Dataset Awareness
+- Add awareness/support for:
+  - forensic export artifacts
+  - Outlook export remnants
+  - Teams exports
+  - attachment collision artifacts
+  - encrypted/protected Office files
+  - partial container recovery
+
+#### Forensic Artifact Routing
+- Add routing awareness for:
+  - `.lef`
+  - `.sbf`
+  - `.xmef`
+  - `.rpmsg`
+- Improve Manual Review classification visibility
+
+#### Optional Salvage Tools
+- Future optional recovery support:
+  - qpdf repair
+  - Ghostscript rewrite
+  - mupdf clean
+  - ZIP recovery checks
+  - Office repair attempts
